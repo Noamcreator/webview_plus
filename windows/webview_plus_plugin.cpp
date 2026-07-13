@@ -309,6 +309,7 @@ WebViewPlusInstance::WebViewPlusInstance(
     HWND message_hwnd, int64_t view_id, const std::string& initial_url,
     const std::string& initial_asset, const std::string& initial_file,
     const flutter::EncodableMap& initial_settings,
+    const std::string& user_data_folder,
     std::function<void(int64_t texture_id)> on_ready,
     std::function<void(const std::string&)> on_error)
     : message_hwnd_(message_hwnd),
@@ -317,6 +318,7 @@ WebViewPlusInstance::WebViewPlusInstance(
       initial_asset_(initial_asset),
       initial_file_(initial_file),
       initial_settings_(initial_settings),
+      user_data_folder_(user_data_folder),
       on_ready_(std::move(on_ready)),
       on_error_(std::move(on_error)),
       registrar_(registrar),
@@ -793,15 +795,19 @@ void WebViewPlusInstance::InitializeWebView2() {
             .Get());
   };
 
-  if (g_environment) {
+  if (user_data_folder_.empty() && g_environment) {
     init_controller(g_environment);
     return;
   }
 
+  std::wstring u_data_dir = user_data_folder_.empty() ? L"" : Utf8ToWide(user_data_folder_);
+
   CreateCoreWebView2EnvironmentWithOptions(
-      nullptr, nullptr, nullptr,
+      nullptr, 
+      u_data_dir.empty() ? nullptr : u_data_dir.c_str(),
+      nullptr,
       Microsoft::WRL::Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
-          [init_controller, on_failure](HRESULT result,
+          [init_controller, on_failure, u_data_dir](HRESULT result,
                                           ICoreWebView2Environment* env)
               -> HRESULT {
             if (!env) {
@@ -815,7 +821,10 @@ void WebViewPlusInstance::InitializeWebView2() {
               return S_OK;
             }
 
-            g_environment = env3;
+            if (u_data_dir.empty()) {
+              g_environment = env3;
+            }
+
             init_controller(env3);
             return S_OK;
           })
@@ -1343,6 +1352,13 @@ void WebViewPlusPluginCApi::RegisterWithRegistrar(
                std::holds_alternative<std::string>(file_it->second))
                   ? std::get<std::string>(file_it->second)
                   : "";
+          
+          auto udf_it = args->find(EncodableValue(std::string("userDataFolder")));
+          std::string user_data_folder =
+              (udf_it != args->end() &&
+               std::holds_alternative<std::string>(udf_it->second))
+                  ? std::get<std::string>(udf_it->second)
+                  : "";
 
           EncodableMap initial_settings;
           auto settings_it =
@@ -1365,7 +1381,7 @@ void WebViewPlusPluginCApi::RegisterWithRegistrar(
 
           auto instance = std::make_unique<WebViewPlusInstance>(
               registrar, g_platform.get(), message_hwnd, view_id, initial_url,
-              initial_asset, initial_file, initial_settings,
+              initial_asset, initial_file, initial_settings, user_data_folder,
               [shared_result, view_id](int64_t texture_id) {
                 EncodableMap response;
                 response[EncodableValue("textureId")] =

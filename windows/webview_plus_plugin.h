@@ -69,6 +69,7 @@ class WebViewPlusInstance {
                          const std::string& initial_asset,
                          const std::string& initial_file,
                          const flutter::EncodableMap& initial_settings,
+                         const std::string& user_data_folder,
                          std::function<void(int64_t texture_id)> on_ready,
                          std::function<void(const std::string&)> on_error);
   ~WebViewPlusInstance();
@@ -114,6 +115,7 @@ class WebViewPlusInstance {
   std::string initial_url_;
   std::string initial_asset_;
   std::string initial_file_;
+  std::string user_data_folder_;
   flutter::EncodableMap initial_settings_;
 
   bool is_navigating_internally_ = false;

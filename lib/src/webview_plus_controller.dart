@@ -227,7 +227,6 @@ class WebviewPlusController implements WebviewPlatformController {
 
       case 'onWindowBlur':
         _onWindowBlur?.call(_controller);
-        return null;
 
       case 'onContextMenuAction':
         final map = Map<String, dynamic>.from(call.arguments as Map);

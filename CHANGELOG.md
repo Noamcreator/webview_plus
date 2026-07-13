@@ -1,3 +1,7 @@
+## 0.3.0
+
+- Add WebviewEnvironment for Windows (userDataFolder)
+
 ## 0.2.0
 
 - Update onLoadStart / onLoadStop / onReceivedError / onNavigationRequest and remove shouldOverrideUrlLoading (now use onNavigationRequest only)

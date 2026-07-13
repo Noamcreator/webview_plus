@@ -5,6 +5,7 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
+import 'package:webview_plus/src/webview_plus_environment.dart';
 import 'webview_plus_context_menu.dart';
 import 'webview_plus_controller.dart';
 import 'webview_plus_settings.dart';
@@ -23,7 +24,7 @@ class WebviewWidget extends StatefulWidget {
     super.key,
     this.gestureRecognizers,
     this.layoutDirection,
-    //this.webViewEnvironment,
+    this.webViewEnvironment,
     this.initialUrl,
     this.initialAsset,
     this.initialFile,
@@ -50,7 +51,7 @@ class WebviewWidget extends StatefulWidget {
 
   final Set<Factory<OneSequenceGestureRecognizer>>? gestureRecognizers;
   final TextDirection? layoutDirection;
-  //final WebViewPlatformEnvironment? webViewEnvironment;
+  final WebViewEnvironment? webViewEnvironment;
   final String? initialUrl;
   final String? initialAsset;
   final String? initialFile;
@@ -143,6 +144,7 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
         'initialAsset': widget.initialAsset,
         'initialFile': widget.initialFile,
         'initialSettings': widget.initialSettings.toMap(),
+        'userDataFolder': widget.webViewEnvironment?.settings?.userDataFolder,
       });
 
       final Map<dynamic, dynamic> response =
