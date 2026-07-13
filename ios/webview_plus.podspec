@@ -4,10 +4,10 @@
 #
 Pod::Spec.new do |s|
   s.name             = 'webview_plus'
-  s.version          = '0.1.0'
-  s.summary          = 'A cross-platform Flutter plugin that directly encapsulates native WebViews (Android WebView, iOS/macOS WKWebView, Windows WebView2, Linux WebKitGTK, Web iframe) with no third-party WebView dependencies.'
+  s.version          = '0.2.0'
+  s.summary          = 'A cross-platform Flutter plugin that directly encapsulates native WebViews (Android, iOS/macOS, Windows, Linux andWeb) with no WebView dependencies.'
   s.description      = <<-DESC
-  A cross-platform Flutter plugin that directly encapsulates native WebViews (Android WebView, iOS/macOS WKWebView, Windows WebView2, Linux WebKitGTK, Web iframe) with no third-party WebView dependencies.
+  A cross-platform Flutter plugin that directly encapsulates native WebViews (Android, iOS/macOS, Windows, Linux andWeb) with no WebView dependencies.
                        DESC
   s.homepage         = 'https://github.com/Noamcreator/webview_plus'
   s.license          = { :file => '../LICENSE' }
