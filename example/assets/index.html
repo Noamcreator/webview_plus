@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Démo webview_plus</title>
+  <style>
+    body {
+      font-family: -apple-system, Roboto, sans-serif;
+      padding: 24px;
+      background: #f2f2f7;
+    }
+    h1 { color: #1a1a1a; }
+    button {
+      background: #6750A4;
+      color: white;
+      border: none;
+      padding: 12px 20px;
+      border-radius: 8px;
+      font-size: 16px;
+      margin: 8px 0;
+      display: block;
+      width: 100%;
+    }
+    a.blocked {
+      display: block;
+      margin-top: 16px;
+      color: #B00020;
+    }
+    #log {
+      margin-top: 16px;
+      font-size: 13px;
+      color: #444;
+    }
+  </style>
+</head>
+<body>
+  <h1>Page chargée depuis les assets Flutter</h1>
+  <p>Cette page communique avec Dart via <code>WebviewPlusChannel</code>.</p>
+
+  <button onclick="envoyerMessage()">Envoyer un message à Flutter</button>
+  <button onclick="envoyerDonneeFlutter()">Envoyer des données à flutter et en recevoir depuis le Dart</button>
+
+  <a class="blocked" href="https://www.bloque.com">
+    Lien vers bloque.com (sera intercepté et bloqué par Dart)
+  </a>
+  <a href="https://www.exemple-autorise.com">
+    Lien autorisé (sera intercepté puis autorisé par Dart)
+  </a>
+
+  <div id="log"></div>
+
+  <script>
+    function envoyerMessage() {
+      // C'est l'appel central demandé dans le cahier des charges :
+      // WebviewPlusChannel est injecté nativement par le plugin
+      // sur chaque plateforme (Android/iOS/macOS/Windows/Linux/Web).
+      WebviewPlusChannel.postMessage("Bonjour depuis le JavaScript !");
+      log("Message envoyé à Flutter.");
+    }
+
+    async function envoyerDonneeFlutter() {
+      const now = new Date().toLocaleTimeString();
+      let donnees = await window.webview_plus.callHandler('fromJs', 'Bonjour depuis le Dart !', 42);
+      if (donnees && donnees.ok) {
+        log(now + " [Succès]: Reçu à " + donnees.horodatage);
+
+        log(now + " [Succès]: Message reçu : " + donnees.message);
+        
+        // Si tu veux quand même boucler sur les arguments qui ont fait l'aller-retour :
+        donnees.reçu.forEach(function(arg) {
+          log("Argument retourné par Flutter : " + arg);
+        });
+      }
+    }
+
+    function log(text) {
+      const el = document.getElementById('log');
+      // Le \n permet de passer à la ligne à chaque nouveau message
+      el.textContent += text + "\n"; 
+    }
+  </script>
+</body>
+</html>
