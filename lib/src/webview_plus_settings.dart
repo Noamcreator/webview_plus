@@ -135,7 +135,7 @@ class WebviewSettings {
         'disableContextMenu': disableContextMenu,
         'disableLongPressContextMenuOnLinks':
             disableLongPressContextMenuOnLinks,
-        'selectionHandleColor': selectionHandleColor?.value,
+        'selectionHandleColor': selectionHandleColor?.toARGB32(),
         'useHybridComposition': useHybridComposition,
         'allowsBackForwardNavigationGestures':
             allowsBackForwardNavigationGestures,

@@ -74,7 +74,6 @@ class WebviewWidget extends StatefulWidget {
 }
 
 class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserver {
-  WebviewPlatformController? _controller;
   static const MethodChannel _globalWindowsChannel = MethodChannel('plugins.noam.me/webview_plus_windows');
   static const MethodChannel _globalLinuxChannel = MethodChannel('plugins.noam.me/webview_plus_linux');
 
@@ -494,7 +493,6 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
   }
 
   void _handleControllerCreated(WebviewPlatformController controller) {
-    _controller = controller;
     if (controller is WebviewPlusController) {
       widget.onWebviewCreated?.call(controller);
     }
@@ -509,7 +507,6 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
     if (_linuxViewId != null) {
       _globalLinuxChannel.invokeMethod('dispose', {'viewId': _linuxViewId});
     }
-    _controller = null;
     super.dispose();
   }
 }

@@ -1,5 +1,3 @@
-library webview_plus;
-
 export 'src/webview_plus_widget.dart';
 export 'src/webview_plus_settings.dart';
 export 'src/webview_plus_context_menu.dart';
