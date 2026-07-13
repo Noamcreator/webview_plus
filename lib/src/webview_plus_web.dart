@@ -208,7 +208,7 @@ Widget buildWebview({
     if (data == null) return;
 
     if (data.isA<JSString>()) {
-      onMessageReceived?.call((data as JSString).toDart);
+      onMessageReceived?.call(controller, (data as JSString).toDart);
     } else if (data.isA<JSObject>()) {
       try {
         final jsObj = data as JSObject;
@@ -216,7 +216,7 @@ Widget buildWebview({
         if (jsObj.has('message')) {
           final JSAny? messageValue = jsObj['message'];
           if (messageValue != null && messageValue.isA<JSString>()) {
-            onMessageReceived?.call((messageValue as JSString).toDart);
+            onMessageReceived?.call(controller, (messageValue as JSString).toDart);
           }
         }
         // Format `{handlerName, args}` -> pont vers addJavaScriptHandler.
@@ -236,7 +236,7 @@ Widget buildWebview({
     if (onNavigationRequest != null) {
       try {
         final currentUrl = iframe.src;
-        await onNavigationRequest(currentUrl);
+        await onNavigationRequest(controller, Uri.parse(currentUrl));
       } catch (_) {}
     }
     try {

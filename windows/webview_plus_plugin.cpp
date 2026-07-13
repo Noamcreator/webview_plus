@@ -588,6 +588,28 @@ void WebViewPlusInstance::InitializeWebView2() {
                       })
                       .Get(),
                   &accel_token);
+              
+              EventRegistrationToken focus_token;
+              controller_->add_GotFocus(
+                  Microsoft::WRL::Callback<ICoreWebView2FocusChangedEventHandler>(
+                      [this](ICoreWebView2Controller* sender, IUnknown* args)
+                          -> HRESULT {
+                        channel_->InvokeMethod("onWindowFocus", nullptr);
+                        return S_OK;
+                      })
+                      .Get(),
+                  &focus_token);
+
+              EventRegistrationToken blur_token;
+              controller_->add_LostFocus(
+                  Microsoft::WRL::Callback<ICoreWebView2FocusChangedEventHandler>(
+                      [this](ICoreWebView2Controller* sender, IUnknown* args)
+                          -> HRESULT {
+                        channel_->InvokeMethod("onWindowBlur", nullptr);
+                        return S_OK;
+                      })
+                      .Get(),
+                  &blur_token);
 
               if (!CreateCompositionSurface()) {
                 on_failure("Composition surface creation failed");
@@ -698,6 +720,28 @@ void WebViewPlusInstance::InitializeWebView2() {
                       })
                       .Get(),
                   &token);
+
+              Microsoft::WRL::ComPtr<ICoreWebView2_2> webview2;
+              if (SUCCEEDED(webview_.As(&webview2)) && webview2) {
+                EventRegistrationToken dcl_token;
+                webview2->add_DOMContentLoaded(
+                    Microsoft::WRL::Callback<ICoreWebView2DOMContentLoadedEventHandler>(
+                        [this](ICoreWebView2* sender,
+                                ICoreWebView2DOMContentLoadedEventArgs* args)
+                            -> HRESULT {
+                          LPWSTR uri = nullptr;
+                          if (webview_) webview_->get_Source(&uri);
+                          std::string url = uri ? WideToUtf8(uri) : std::string();
+                          if (uri) CoTaskMemFree(uri);
+
+                          channel_->InvokeMethod(
+                              "onDOMContentLoaded",
+                              std::make_unique<EncodableValue>(url));
+                          return S_OK;
+                        })
+                        .Get(),
+                    &dcl_token);
+              }
 
               Microsoft::WRL::ComPtr<ICoreWebView2_11> webview11;
               if (SUCCEEDED(webview_.As(&webview11)) && webview11) {

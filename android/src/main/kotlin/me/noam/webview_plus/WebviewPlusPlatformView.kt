@@ -103,6 +103,16 @@ class WebviewPlusPlatformView(
 
         applySettings(settings)
 
+        webView.setOnFocusChangeListener { _, hasFocus ->
+            mainHandler.post {
+                if (hasFocus) {
+                    channel.invokeMethod("onWindowFocus", null)
+                } else {
+                    channel.invokeMethod("onWindowBlur", null)
+                }
+            }
+        }
+
         webView.addJavascriptInterface(
             WebviewPlusJsBridge { message ->
                 mainHandler.post {
@@ -110,6 +120,15 @@ class WebviewPlusPlatformView(
                 }
             },
             "WebviewPlusChannel"
+        )
+
+        webView.addJavascriptInterface(
+            WebviewPlusDomContentLoadedBridge { url ->
+                mainHandler.post {
+                    channel.invokeMethod("onDOMContentLoaded", url)
+                }
+            },
+            "WebviewPlusDomContentLoaded"
         )
 
         // Pont utilisé par `window.webview_plus.callHandler(...)` côté JS
@@ -357,6 +376,9 @@ class WebviewPlusPlatformView(
               if (window.webview_plus) return;
               document.addEventListener('DOMContentLoaded', function() {
                 $cssInjection
+                if (window.WebviewPlusDomContentLoaded) {
+                  window.WebviewPlusDomContentLoaded.onDOMContentLoaded(window.location.href);
+                }
               });
               var __fwCallbackId = 0;
               var __fwCallbacks = {};
@@ -636,6 +658,13 @@ class WebviewPlusJsBridge(private val onMessage: (String) -> Unit) {
     @JavascriptInterface
     fun postMessage(message: String) {
         onMessage(message)
+    }
+}
+
+class WebviewPlusDomContentLoadedBridge(private val onDOMContentLoaded: (String) -> Unit) {
+    @JavascriptInterface
+    fun onDOMContentLoaded(url: String) {
+        onDOMContentLoaded(url)
     }
 }
 

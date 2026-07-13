@@ -76,17 +76,21 @@ abstract class WebviewPlatformController {
 
 /// Callback appelé à chaque tentative de navigation.
 /// Retourner `true` autorise la navigation, `false` la bloque.
-typedef NavigationRequestCallback = FutureOr<bool> Function(String url);
+typedef NavigationRequestCallback = FutureOr<bool> Function(WebviewPlatformController controller, Uri uri);
 
 /// Callback appelé lorsque du JavaScript envoie un message via
 /// `WebviewPlusChannel.postMessage(...)`.
-typedef WebviewMessageCallback = void Function(String message);
+typedef WebviewMessageCallback = void Function(WebviewPlatformController controller, String message);
 
 /// Callback appelé au début / à la fin du chargement d'une page.
-typedef WebviewLoadCallback = void Function(String url);
+typedef WebviewLoadCallback = void Function(WebviewPlatformController controller, Uri uri);
+
+/// Callback appelé avec un controller
+typedef WebviewControllerCallback = void Function(WebviewPlatformController controller);
 
 /// Callback appelé lorsqu'une erreur de chargement survient.
 typedef WebviewErrorCallback = void Function(
+  WebviewPlatformController controller,
   String url,
   int errorCode,
   String description,
@@ -113,13 +117,18 @@ typedef WebviewCreatedCallback = void Function(
 class WebviewPlusController implements WebviewPlatformController {
   WebviewPlusController._(this._channel);
 
+  static late WebviewPlusController _controller;
+
   final MethodChannel _channel;
 
   NavigationRequestCallback? _onNavigationRequest;
   WebviewMessageCallback? _onMessageReceived;
   WebviewLoadCallback? _onLoadStart;
   WebviewLoadCallback? _onLoadStop;
+  WebviewLoadCallback? _onDOMContentLoaded;
   WebviewErrorCallback? _onReceivedError;
+  WebviewControllerCallback? _onWindowFocus;
+  WebviewControllerCallback? _onWindowBlur;
 
   final Map<String, JavaScriptHandlerCallback> _javaScriptHandlers =
       <String, JavaScriptHandlerCallback>{};
@@ -135,19 +144,25 @@ class WebviewPlusController implements WebviewPlatformController {
     WebviewMessageCallback? onMessageReceived,
     WebviewLoadCallback? onLoadStart,
     WebviewLoadCallback? onLoadStop,
+    WebviewLoadCallback? onDOMContentLoaded,
     WebviewErrorCallback? onReceivedError,
+    WebviewControllerCallback? onWindowFocus,
+    WebviewControllerCallback? onWindowBlur,
     List<ContextMenuItem> contextMenuItems = const <ContextMenuItem>[],
   }) {
     final channel = MethodChannel('webview_plus_$viewId');
-    final controller = WebviewPlusController._(channel)
+    _controller = WebviewPlusController._(channel)
       .._onNavigationRequest = onNavigationRequest
       .._onMessageReceived = onMessageReceived
       .._onLoadStart = onLoadStart
       .._onLoadStop = onLoadStop
-      .._onReceivedError = onReceivedError;
-    controller._registerContextMenuActionsLocally(contextMenuItems);
-    channel.setMethodCallHandler(controller._onMethodCall);
-    return controller;
+      .._onDOMContentLoaded = onDOMContentLoaded
+      .._onReceivedError = onReceivedError
+      .._onWindowFocus = onWindowFocus
+      .._onWindowBlur = onWindowBlur;
+    _controller._registerContextMenuActionsLocally(contextMenuItems);
+    channel.setMethodCallHandler(_controller._onMethodCall);
+    return _controller;
   }
 
   void _registerContextMenuActionsLocally(List<ContextMenuItem> items) {
@@ -171,33 +186,47 @@ class WebviewPlusController implements WebviewPlatformController {
       case 'onNavigationRequest':
         final String url = call.arguments as String;
         if (_onNavigationRequest != null) {
-          final bool allow = await _onNavigationRequest!(url);
+          final bool allow = await _onNavigationRequest!(_controller, Uri.parse(url));
           return allow;
         }
         return true;
 
       case 'onMessageReceived':
         final String message = call.arguments as String;
-        _onMessageReceived?.call(message);
+        _onMessageReceived?.call(_controller, message);
         return null;
 
       case 'onLoadStart':
         final String url = call.arguments as String;
-        _onLoadStart?.call(url);
+        _onLoadStart?.call(_controller, Uri.parse(url));
         return null;
 
       case 'onLoadStop':
         final String url = call.arguments as String;
-        _onLoadStop?.call(url);
+        _onLoadStop?.call(_controller, Uri.parse(url));
+        return null;
+
+      case 'onDOMContentLoaded':
+        final String url = call.arguments as String;
+        _onDOMContentLoaded?.call(_controller, Uri.parse(url));
         return null;
 
       case 'onReceivedError':
         final map = Map<String, dynamic>.from(call.arguments as Map);
         _onReceivedError?.call(
+          _controller,
           map['url'] as String? ?? '',
           map['code'] as int? ?? -1,
           map['description'] as String? ?? '',
         );
+        return null;
+
+      case 'onWindowFocus':
+        _onWindowFocus?.call(_controller);
+        return null;
+
+      case 'onWindowBlur':
+        _onWindowBlur?.call(_controller);
         return null;
 
       case 'onContextMenuAction':
@@ -231,8 +260,7 @@ class WebviewPlusController implements WebviewPlatformController {
         return await handler(args);
 
       default:
-        throw MissingPluginException(
-            'Méthode non gérée côté Dart : ${call.method}');
+        throw MissingPluginException('Méthode non gérée côté Dart : ${call.method}');
     }
   }
 

@@ -326,33 +326,49 @@ class _WebviewDemoPageState extends State<WebviewDemoPage> {
                 _registerHandlers(controller);
                 setState(() => _status = 'Webview créée.');
               },
-              onLoadStart: (url) {
+              onLoadStart: (controller, url) {
                 setState(() {
                   _isLoading = true;
                   _status = 'Chargement : $url';
                 });
               },
-              onLoadStop: (url) {
+              onLoadStop: (controller, url) {
                 setState(() {
                   _isLoading = false;
                   _status = 'Chargé : $url';
-                  _urlFieldController.text = url;
+                  _urlFieldController.text = url.toString();
                 });
               },
-              onReceivedError: (url, code, description) {
+              onDOMContentLoaded: (controller, url) {
+                print('onDOMContentLoaded $url');
+                setState(() {
+                  _status = 'DOM Content Loaded : $url';
+                });
+              },
+              onReceivedError: (controller, url, code, description) {
                 setState(() {
                   _isLoading = false;
                   _status = 'Erreur ($code) sur $url : $description';
                 });
               },
-              shouldOverrideUrlLoading: (url) async {
-                final bool bloque = url.contains('bloque.com');
+              onWindowFocus: (controller) {
+                setState(() {
+                  _status = 'Window Focus';
+                });
+              },
+              onWindowBlur: (controller) {
+                setState(() {
+                  _status = 'Window Blur';
+                });
+              },
+              onNavigationRequest: (controller, url) async {
+                final bool bloque = url.toString().contains('bloque.com');
                 if (bloque) {
                   _pushLog('Navigation bloquée : $url');
                 }
                 return !bloque;
               },
-              onMessageReceived: (message) {
+              onMessageReceived: (controller, message) {
                 _pushLog('postMessage : $message');
                 ScaffoldMessenger.of(context).showSnackBar(
                   SnackBar(content: Text(message), duration: const Duration(seconds: 2)),

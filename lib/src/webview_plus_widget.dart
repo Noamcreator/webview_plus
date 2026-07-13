@@ -21,6 +21,9 @@ const int _kTertiaryMouseButton = 4;
 class WebviewWidget extends StatefulWidget {
   const WebviewWidget({
     super.key,
+    this.gestureRecognizers,
+    this.layoutDirection,
+    //this.webViewEnvironment,
     this.initialUrl,
     this.initialAsset,
     this.initialFile,
@@ -30,8 +33,10 @@ class WebviewWidget extends StatefulWidget {
     this.onMessageReceived,
     this.onLoadStart,
     this.onLoadStop,
-    this.shouldOverrideUrlLoading,
+    this.onDOMContentLoaded,
     this.onReceivedError,
+    this.onWindowFocus,
+    this.onWindowBlur,
     this.filterQuality = FilterQuality.none,
     this.contextMenuItems = const <ContextMenuItem>[],
   }) : assert(
@@ -43,17 +48,23 @@ class WebviewWidget extends StatefulWidget {
           'initialUrl, initialAsset et initialFile.',
         );
 
+  final Set<Factory<OneSequenceGestureRecognizer>>? gestureRecognizers;
+  final TextDirection? layoutDirection;
+  //final WebViewPlatformEnvironment? webViewEnvironment;
   final String? initialUrl;
   final String? initialAsset;
   final String? initialFile;
   final WebviewSettings initialSettings;
   final WebviewCreatedCallback? onWebviewCreated;
   final NavigationRequestCallback? onNavigationRequest;
-  final NavigationRequestCallback? shouldOverrideUrlLoading;
   final WebviewMessageCallback? onMessageReceived;
   final WebviewLoadCallback? onLoadStart;
   final WebviewLoadCallback? onLoadStop;
+  final WebviewLoadCallback? onDOMContentLoaded;
   final WebviewErrorCallback? onReceivedError;
+
+  final WebviewControllerCallback? onWindowFocus;
+  final WebviewControllerCallback? onWindowBlur;
 
   /// Qualité de filtrage appliquée à la texture Windows (composition Webview2).
   final FilterQuality filterQuality;
@@ -89,11 +100,9 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
   final GlobalKey _windowsWidgetKey = GlobalKey();
   final Map<int, int> _downButtons = <int, int>{};
 
-  NavigationRequestCallback? get _effectiveNavigationCallback =>
-      widget.shouldOverrideUrlLoading ?? widget.onNavigationRequest;
+  NavigationRequestCallback? get _effectiveNavigationCallback => widget.onNavigationRequest;
 
-  WebviewLoadCallback? get _effectiveOnLoadStop =>
-      widget.onLoadStop;
+  WebviewLoadCallback? get _effectiveOnLoadStop => widget.onLoadStop;
 
   @override
   void initState() {
@@ -147,6 +156,8 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
         onLoadStart: widget.onLoadStart,
         onLoadStop: _effectiveOnLoadStop,
         onReceivedError: widget.onReceivedError,
+        onWindowFocus: widget.onWindowFocus,
+        onWindowBlur: widget.onWindowBlur,
       );
 
       if (!mounted) return;
@@ -392,8 +403,7 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
             surfaceFactory: (context, controller) {
               return AndroidViewSurface(
                 controller: controller as AndroidViewController,
-                gestureRecognizers:
-                    const <Factory<OneSequenceGestureRecognizer>>{},
+                gestureRecognizers: widget.gestureRecognizers ?? const <Factory<OneSequenceGestureRecognizer>>{},
                 hitTestBehavior: PlatformViewHitTestBehavior.opaque,
               );
             },
@@ -401,7 +411,7 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
               return PlatformViewsService.initExpensiveAndroidView(
                 id: params.id,
                 viewType: _kViewType,
-                layoutDirection: TextDirection.ltr,
+                layoutDirection: widget.layoutDirection ?? TextDirection.ltr,
                 creationParams: creationParams,
                 creationParamsCodec: const StandardMessageCodec(),
                 onFocus: () => params.onFocusChanged(true),
@@ -416,7 +426,8 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
         } else {
           return AndroidView(
             viewType: _kViewType,
-            layoutDirection: TextDirection.ltr,
+            layoutDirection: widget.layoutDirection ?? TextDirection.ltr,
+            gestureRecognizers: widget.gestureRecognizers,
             creationParams: creationParams,
             creationParamsCodec: const StandardMessageCodec(),
             onPlatformViewCreated: _onPlatformViewCreated, // 💡 AJOUT ICI
@@ -486,8 +497,7 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
       onLoadStart: widget.onLoadStart,
       onLoadStop: _effectiveOnLoadStop,
       onReceivedError: widget.onReceivedError,
-      contextMenuItems:
-          supportsContextMenuItems ? widget.contextMenuItems : const [],
+      contextMenuItems: supportsContextMenuItems ? widget.contextMenuItems : const [],
     );
     _handleControllerCreated(controller);
   }

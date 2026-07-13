@@ -126,7 +126,7 @@ window.webview_plus.callHandler('calculateTax', 100.0, 0.20)
 You can strip down or add custom buttons to the native text selection action bar. This is handled deep within native platform architectures (`ActionMode` on Android and `UIContextMenuConfiguration` on iOS).
 
 ```dart
-WebviewPlus(
+WebviewWidget(
   initialUrl: 'https://flutter.dev',
   contextMenuItems: [
     ContextMenuItem(
