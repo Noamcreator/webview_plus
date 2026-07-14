@@ -8,6 +8,7 @@
 #include <windows.h>
 #include <windows.ui.composition.h>
 #include <wrl.h>
+#include <commctrl.h>
 #include "WebView2.h"
 
 #include <functional>
@@ -90,6 +91,14 @@ class WebViewPlusInstance {
   void SetPointerButtonState(int button, bool is_down);
   void SetScrollDelta(double dx, double dy);
 
+  // Doit être appelé chaque fois que la fenêtre native top-level qui
+  // héberge cette instance change de position à l'écran (WM_MOVE /
+  // WM_WINDOWPOSCHANGED). Sans cet appel, WebView2 positionne mal tout
+  // ce qui est calculé en coordonnées écran pour un contrôle hébergé en
+  // composition (menu contextuel par défaut, IME, etc.), car il n'a
+  // aucun autre moyen de connaître la position réelle de la fenêtre.
+  void NotifyWindowMoved();
+
  private:
   void InitializeWebView2();
   bool CreateCompositionSurface();
@@ -98,6 +107,13 @@ class WebViewPlusInstance {
   void InjectBridgeScript();
   void HandleWebMessage(const std::wstring& raw);
   void SendScroll(double delta, bool horizontal);
+
+  // Traduit un HCURSOR renvoyé par WebView2 (CursorChanged) en un
+  // identifiant générique envoyé à Dart, qui le mappe vers un
+  // SystemMouseCursor. Nécessaire car en mode composition, WebView2 ne
+  // possède pas de HWND visible sur lequel poser le curseur système
+  // lui-même : c'est la fenêtre Flutter qui doit le faire.
+  static std::string CursorKindFromHandle(HCURSOR cursor);
 
   static std::wstring GetExecutableDir();
   std::wstring BuildAssetUrl(const std::string& asset_path);

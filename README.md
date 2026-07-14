@@ -49,7 +49,7 @@ class MyApp extends StatelessWidget {
         appBar: AppBar(title: const Text('Webview Plus Example')),
         body: WebviewWidget(
           initialAsset: 'assets/index.html',
-          onWebviewCreated: (controller) {
+          onWebViewCreated: (controller) {
             print("Webview has been successfully instantiated.");
           },
           onMessageReceived: (message) {

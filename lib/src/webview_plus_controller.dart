@@ -88,6 +88,16 @@ typedef WebviewLoadCallback = void Function(WebviewPlatformController controller
 /// Callback appelé avec un controller
 typedef WebviewControllerCallback = void Function(WebviewPlatformController controller);
 
+/// Callback appelé lorsque le curseur système à afficher au-dessus de la
+/// Webview change (Windows uniquement, mode composition). [cursorKind] est
+/// un identifiant générique ("basic", "click", "text", "wait", "precise",
+/// "resizeLeftRight", "resizeUpDown", "allScroll", "forbidden") à mapper
+/// vers un `SystemMouseCursor` côté widget.
+typedef WebviewCursorCallback = void Function(
+  WebviewPlatformController controller,
+  String cursorKind,
+);
+
 /// Callback appelé lorsqu'une erreur de chargement survient.
 typedef WebviewErrorCallback = void Function(
   WebviewPlatformController controller,
@@ -129,6 +139,7 @@ class WebviewPlusController implements WebviewPlatformController {
   WebviewErrorCallback? _onReceivedError;
   WebviewControllerCallback? _onWindowFocus;
   WebviewControllerCallback? _onWindowBlur;
+  WebviewCursorCallback? _onCursorChanged;
 
   final Map<String, JavaScriptHandlerCallback> _javaScriptHandlers =
       <String, JavaScriptHandlerCallback>{};
@@ -148,6 +159,7 @@ class WebviewPlusController implements WebviewPlatformController {
     WebviewErrorCallback? onReceivedError,
     WebviewControllerCallback? onWindowFocus,
     WebviewControllerCallback? onWindowBlur,
+    WebviewCursorCallback? onCursorChanged,
     List<ContextMenuItem> contextMenuItems = const <ContextMenuItem>[],
   }) {
     final channel = MethodChannel('webview_plus_$viewId');
@@ -159,7 +171,8 @@ class WebviewPlusController implements WebviewPlatformController {
       .._onDOMContentLoaded = onDOMContentLoaded
       .._onReceivedError = onReceivedError
       .._onWindowFocus = onWindowFocus
-      .._onWindowBlur = onWindowBlur;
+      .._onWindowBlur = onWindowBlur
+      .._onCursorChanged = onCursorChanged;
     _controller._registerContextMenuActionsLocally(contextMenuItems);
     channel.setMethodCallHandler(_controller._onMethodCall);
     return _controller;
@@ -227,6 +240,12 @@ class WebviewPlusController implements WebviewPlatformController {
 
       case 'onWindowBlur':
         _onWindowBlur?.call(_controller);
+        return null;
+
+      case 'onCursorChanged':
+        final String cursorKind = call.arguments as String;
+        _onCursorChanged?.call(_controller, cursorKind);
+        return null;
 
       case 'onContextMenuAction':
         final map = Map<String, dynamic>.from(call.arguments as Map);

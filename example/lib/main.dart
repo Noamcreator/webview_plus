@@ -264,7 +264,7 @@ class _WebviewDemoPageState extends State<WebviewDemoPage> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('webview_plus — démo complète'),
+        title: const Text('Webview Plus — Démo Complète'),
         actions: [
           IconButton(
             icon: const Icon(Icons.arrow_back),
@@ -321,7 +321,7 @@ class _WebviewDemoPageState extends State<WebviewDemoPage> {
               initialUrl: _urlFieldController.text,
               initialSettings: _currentSettings,
               contextMenuItems: _contextMenuItems,
-              onWebviewCreated: (controller) {
+              onWebViewCreated: (controller) {
                 _controller = controller;
                 _registerHandlers(controller);
                 setState(() => _status = 'Webview créée.');

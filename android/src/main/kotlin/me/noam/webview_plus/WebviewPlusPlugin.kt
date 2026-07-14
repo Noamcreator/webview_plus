@@ -1,16 +1,26 @@
 package me.noam.webview_plus
 
 import android.app.Activity
+import android.os.Build
 import android.view.ActionMode
 import android.view.Window
 import android.webkit.WebView
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.embedding.engine.plugins.activity.ActivityAware
 import io.flutter.embedding.engine.plugins.activity.ActivityPluginBinding
+import io.flutter.plugin.common.MethodChannel
 
 class WebviewPlusPlugin : FlutterPlugin, ActivityAware {
 
     private var factory: WebviewPlusFactory? = null
+
+    // Canal global (indépendant de chaque instance de Webview) permettant
+    // au côté Dart de connaître l'API level Android au runtime, afin de
+    // choisir entre `initSurfaceAndroidView` (Texture Layer Hybrid
+    // Composition, nécessite API 23+) et les modes historiques
+    // (`initExpensiveAndroidView` / Virtual Display) sur les appareils
+    // plus anciens. Voir `webview_plus_widget.dart` (_getAndroidSdkInt).
+    private var infoChannel: MethodChannel? = null
 
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         factory = WebviewPlusFactory(
@@ -21,10 +31,20 @@ class WebviewPlusPlugin : FlutterPlugin, ActivityAware {
             "plugins.noam.me/webview_plus",
             factory!!
         )
+
+        infoChannel = MethodChannel(binding.binaryMessenger, "plugins.noam.me/webview_plus_info")
+        infoChannel?.setMethodCallHandler { call, result ->
+            when (call.method) {
+                "getSdkInt" -> result.success(Build.VERSION.SDK_INT)
+                else -> result.notImplemented()
+            }
+        }
     }
 
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
         factory = null
+        infoChannel?.setMethodCallHandler(null)
+        infoChannel = null
     }
 
     // -- ActivityAware --------------------------------------------------

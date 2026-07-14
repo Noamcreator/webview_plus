@@ -288,7 +288,18 @@ bool EnsurePlatform() {
   return g_platform && g_platform->IsSupported();
 }
 
-HWND CreateMessageWindow() {
+// Fenêtre factice invisible utilisée comme hôte du
+// ICoreWebView2CompositionController. Elle DOIT être un enfant (WS_CHILD)
+// de la vraie fenêtre top-level Flutter, et non un message-only window
+// sous HWND_MESSAGE comme auparavant : un message-only window est
+// totalement détaché de la hiérarchie de fenêtres réelle. Quand WebView2
+// réagit à un clic en appelant en interne SetFocus() sur cette fenêtre,
+// Windows désactivait alors la précédente fenêtre active — la vraie
+// fenêtre Flutter — faute de lien de parenté entre les deux. En la
+// rattachant comme enfant, un SetFocus() dessus reste "à l'intérieur" de
+// la fenêtre Flutter du point de vue de Windows, qui ne la désactive
+// plus.
+HWND CreateMessageWindow(HWND parent) {
   if (!g_message_window_class_registered) {
     g_message_window_class.lpszClassName = L"WebViewPlusMessage";
     g_message_window_class.lpfnWndProc = &DefWindowProc;
@@ -297,9 +308,40 @@ HWND CreateMessageWindow() {
     g_message_window_class_registered = true;
   }
 
-  return CreateWindowExW(0, g_message_window_class.lpszClassName, L"", 0, 0, 0,
-                         0, 0, HWND_MESSAGE, nullptr,
+  return CreateWindowExW(0, g_message_window_class.lpszClassName, L"",
+                         WS_CHILD, 0, 0, 0, 0, parent, nullptr,
                          g_message_window_class.hInstance, nullptr);
+}
+
+// Sous-classement de la vraie fenêtre top-level Flutter afin de détecter
+// ses déplacements à l'écran (WM_MOVE / WM_WINDOWPOSCHANGED) et de
+// prévenir chaque instance WebView2 en conséquence (voir
+// WebViewPlusInstance::NotifyWindowMoved). Sans cela, le menu contextuel
+// par défaut de WebView2 (et l'IME, etc.) est mal positionné en mode
+// fenêtré, WebView2 n'ayant aucun autre moyen de connaître la position
+// réelle de la fenêtre.
+LRESULT CALLBACK WebViewPlusWindowSubclassProc(HWND hwnd, UINT msg,
+                                                WPARAM wparam, LPARAM lparam,
+                                                UINT_PTR subclass_id,
+                                                DWORD_PTR ref_data) {
+  if (msg == WM_MOVE || msg == WM_WINDOWPOSCHANGED) {
+    for (auto& entry : g_instances) {
+      entry.second->NotifyWindowMoved();
+    }
+  }
+  if (msg == WM_NCDESTROY) {
+    RemoveWindowSubclass(hwnd, &WebViewPlusWindowSubclassProc, subclass_id);
+  }
+  return DefSubclassProc(hwnd, msg, wparam, lparam);
+}
+
+bool g_window_subclassed = false;
+
+void EnsureWindowSubclassed(HWND top_level_hwnd) {
+  if (g_window_subclassed || !top_level_hwnd) return;
+  SetWindowSubclass(top_level_hwnd, &WebViewPlusWindowSubclassProc,
+                     /*uIdSubclass=*/1, 0);
+  g_window_subclassed = true;
 }
 
 }  // namespace
@@ -420,6 +462,14 @@ WebViewPlusInstance::WebViewPlusInstance(
         } else if (method == "goForward") {
           if (webview_) webview_->GoForward();
           result->Success();
+        } else if (method == "canGoBack") {
+          BOOL can_go_back = FALSE;
+          if (webview_) webview_->get_CanGoBack(&can_go_back);
+          result->Success(EncodableValue(static_cast<bool>(can_go_back)));
+        } else if (method == "canGoForward") {
+          BOOL can_go_forward = FALSE;
+          if (webview_) webview_->get_CanGoForward(&can_go_forward);
+          result->Success(EncodableValue(static_cast<bool>(can_go_forward)));
         } else {
           result->NotImplemented();
         }
@@ -612,6 +662,31 @@ void WebViewPlusInstance::InitializeWebView2() {
                       })
                       .Get(),
                   &blur_token);
+
+              // En mode composition, WebView2 n'a pas de HWND visible sur
+              // lequel poser lui-même le curseur système : c'est la
+              // fenêtre Flutter qui doit le faire. On écoute donc les
+              // changements de curseur voulus par la page et on les
+              // transmet à Dart. add_CursorChanged/get_Cursor font partie
+              // de l'interface stable ICoreWebView2CompositionController,
+              // pas besoin de QueryInterface vers une variante.
+              EventRegistrationToken cursor_token;
+              composition_controller_->add_CursorChanged(
+                  Microsoft::WRL::Callback<ICoreWebView2CursorChangedEventHandler>(
+                      [this](ICoreWebView2CompositionController* sender,
+                             IUnknown* args) -> HRESULT {
+                        HCURSOR cursor = nullptr;
+                        if (sender) {
+                          sender->get_Cursor(&cursor);
+                        }
+                        channel_->InvokeMethod(
+                            "onCursorChanged",
+                            std::make_unique<EncodableValue>(
+                                CursorKindFromHandle(cursor)));
+                        return S_OK;
+                      })
+                      .Get(),
+                  &cursor_token);
 
               if (!CreateCompositionSurface()) {
                 on_failure("Composition surface creation failed");
@@ -1298,6 +1373,41 @@ void WebViewPlusInstance::SetScrollDelta(double dx, double dy) {
   }
 }
 
+void WebViewPlusInstance::NotifyWindowMoved() {
+  if (controller_) {
+    controller_->NotifyParentWindowPositionChanged();
+  }
+}
+
+// Best-effort : WebView2 ne renvoie qu'un HCURSOR brut (pas de "type"
+// symbolique), donc on le compare aux curseurs système standards chargés
+// une seule fois. Couvre les cas les plus courants (lien, texte, resize,
+// etc.) ; tout curseur non reconnu (ex. curseur CSS personnalisé) retombe
+// sur "basic".
+std::string WebViewPlusInstance::CursorKindFromHandle(HCURSOR cursor) {
+  static const HCURSOR kArrow = LoadCursor(nullptr, IDC_ARROW);
+  static const HCURSOR kHand = LoadCursor(nullptr, IDC_HAND);
+  static const HCURSOR kIBeam = LoadCursor(nullptr, IDC_IBEAM);
+  static const HCURSOR kWait = LoadCursor(nullptr, IDC_WAIT);
+  static const HCURSOR kCross = LoadCursor(nullptr, IDC_CROSS);
+  static const HCURSOR kSizeWE = LoadCursor(nullptr, IDC_SIZEWE);
+  static const HCURSOR kSizeNS = LoadCursor(nullptr, IDC_SIZENS);
+  static const HCURSOR kSizeAll = LoadCursor(nullptr, IDC_SIZEALL);
+  static const HCURSOR kNo = LoadCursor(nullptr, IDC_NO);
+
+  if (!cursor) return "basic";
+  if (cursor == kHand) return "click";
+  if (cursor == kIBeam) return "text";
+  if (cursor == kWait) return "wait";
+  if (cursor == kCross) return "precise";
+  if (cursor == kSizeWE) return "resizeLeftRight";
+  if (cursor == kSizeNS) return "resizeUpDown";
+  if (cursor == kSizeAll) return "allScroll";
+  if (cursor == kNo) return "forbidden";
+  if (cursor == kArrow) return "basic";
+  return "basic";
+}
+
 void WebViewPlusPluginCApi::RegisterWithRegistrar(
     flutter::PluginRegistrarWindows* registrar) {
   auto plugin = std::make_unique<WebViewPlusPluginCApi>(registrar);
@@ -1369,7 +1479,17 @@ void WebViewPlusPluginCApi::RegisterWithRegistrar(
             }
           }
 
-          HWND message_hwnd = CreateMessageWindow();
+          HWND top_level_hwnd =
+              registrar->GetView() ? registrar->GetView()->GetNativeWindow()
+                                   : nullptr;
+          if (!top_level_hwnd) {
+            result->Error("creation_failed",
+                          "Native top-level window unavailable");
+            return;
+          }
+          EnsureWindowSubclassed(top_level_hwnd);
+
+          HWND message_hwnd = CreateMessageWindow(top_level_hwnd);
           if (!message_hwnd) {
             result->Error("creation_failed", "Failed to create message window");
             return;

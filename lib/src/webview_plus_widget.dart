@@ -29,7 +29,7 @@ class WebviewWidget extends StatefulWidget {
     this.initialAsset,
     this.initialFile,
     this.initialSettings = const WebviewSettings(),
-    this.onWebviewCreated,
+    this.onWebViewCreated,
     this.onNavigationRequest,
     this.onMessageReceived,
     this.onLoadStart,
@@ -56,7 +56,7 @@ class WebviewWidget extends StatefulWidget {
   final String? initialAsset;
   final String? initialFile;
   final WebviewSettings initialSettings;
-  final WebviewCreatedCallback? onWebviewCreated;
+  final WebviewCreatedCallback? onWebViewCreated;
   final NavigationRequestCallback? onNavigationRequest;
   final WebviewMessageCallback? onMessageReceived;
   final WebviewLoadCallback? onLoadStart;
@@ -89,9 +89,47 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
   static const MethodChannel _globalWindowsChannel = MethodChannel('plugins.noam.me/webview_plus_windows');
   static const MethodChannel _globalLinuxChannel = MethodChannel('plugins.noam.me/webview_plus_linux');
 
+  // -- Détection du SDK Android (pour choisir le mode de composition) ----
+  //
+  // `PlatformViewsService.initSurfaceAndroidView` (Texture Layer Hybrid
+  // Composition) offre un scroll natif fluide dans la Webview *et* des
+  // transitions/animations Flutter fluides autour, contrairement à
+  // `initExpensiveAndroidView` (Hybrid Composition classique, jank pendant
+  // les animations) et à `AndroidView` seul (Virtual Display, scroll qui
+  // rame). Il nécessite cependant l'API 23+. Le résultat est mis en cache
+  // au niveau du process : un seul appel de canal pour toute l'app, quel
+  // que soit le nombre d'instances de WebviewWidget créées.
+  static const MethodChannel _globalInfoChannel = MethodChannel('plugins.noam.me/webview_plus_info');
+  static int? _cachedAndroidSdkInt;
+
+  static Future<int> _getAndroidSdkInt() async {
+    final cached = _cachedAndroidSdkInt;
+    if (cached != null) return cached;
+    int sdk;
+    try {
+      sdk = await _globalInfoChannel.invokeMethod<int>('getSdkInt') ?? 23;
+    } catch (_) {
+      // En cas d'échec (ancienne version du plugin natif, etc.), on reste
+      // conservateur et on suppose un appareil récent : c'est le cas de
+      // >99% du parc Android actif.
+      sdk = 23;
+    }
+    _cachedAndroidSdkInt = sdk;
+    return sdk;
+  }
+
+  // `null` tant que non résolu : on part de l'hypothèse optimiste (SDK
+  // 23+) pour ne pas retarder l'affichage de la Webview le temps du
+  // premier aller-retour de canal ; si l'appareil s'avère plus ancien, on
+  // bascule vers le mode adapté dès que `setState` déclenche un rebuild.
+  int? _androidSdkInt;
+  bool _androidHcppSupported = false;
+  bool _isAndroidReady = false;
+
   int? _windowsViewId;
   int? _windowsTextureId;
   bool _windowsReady = false;
+  MouseCursor _windowsCursor = SystemMouseCursors.basic;
 
   int? _linuxViewId;
   bool _linuxCreated = false;
@@ -101,10 +139,6 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
   final GlobalKey _windowsWidgetKey = GlobalKey();
   final Map<int, int> _downButtons = <int, int>{};
 
-  NavigationRequestCallback? get _effectiveNavigationCallback => widget.onNavigationRequest;
-
-  WebviewLoadCallback? get _effectiveOnLoadStop => widget.onLoadStop;
-
   @override
   void initState() {
     super.initState();
@@ -113,6 +147,30 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
       _initWindowsWebview();
     } else if (!kIsWeb && defaultTargetPlatform == TargetPlatform.linux) {
       _initLinuxWebview();
+    } else if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
+      _loadAndroidSdkInt();
+    }
+  }
+
+  Future<void> _loadAndroidSdkInt() async {
+    try {
+      final sdk = await _getAndroidSdkInt();
+      final hcppSupported = await HybridAndroidViewController.checkIfSupported();
+      
+      if (!mounted) return;
+
+      setState(() {
+        _androidSdkInt = sdk;
+        _androidHcppSupported = hcppSupported;
+        _isAndroidReady = true; // On signale que la configuration est prête !
+      });
+    } catch (e) {
+      debugPrint("Erreur lors de la configuration Android : $e");
+      if (mounted) {
+        setState(() {
+          _isAndroidReady = true; // Fallback pour ne pas bloquer l'interface en cas d'erreur
+        });
+      }
     }
   }
 
@@ -153,13 +211,17 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
 
       final controller = WebviewPlusController.init(
         id,
-        onNavigationRequest: _effectiveNavigationCallback,
+        onNavigationRequest: widget.onNavigationRequest,
         onMessageReceived: widget.onMessageReceived,
         onLoadStart: widget.onLoadStart,
-        onLoadStop: _effectiveOnLoadStop,
+        onLoadStop: widget.onLoadStop,
         onReceivedError: widget.onReceivedError,
         onWindowFocus: widget.onWindowFocus,
         onWindowBlur: widget.onWindowBlur,
+        onCursorChanged: (_, cursorKind) {
+          if (!mounted) return;
+          setState(() => _windowsCursor = _cursorFromKind(cursorKind));
+        },
       );
 
       if (!mounted) return;
@@ -201,10 +263,10 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
 
       final controller = WebviewPlusController.init(
         id,
-        onNavigationRequest: _effectiveNavigationCallback,
+        onNavigationRequest: widget.onNavigationRequest,
         onMessageReceived: widget.onMessageReceived,
         onLoadStart: widget.onLoadStart,
-        onLoadStop: _effectiveOnLoadStop,
+        onLoadStop: widget.onLoadStop,
         onReceivedError: widget.onReceivedError,
       );
 
@@ -245,6 +307,35 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
     }
   }
 
+  /// Traduit l'identifiant générique reçu du plugin natif Windows (voir
+  /// `CursorKindFromHandle` côté C++) en `SystemMouseCursor` Flutter. En
+  /// mode composition, WebView2 n'a pas de HWND visible sur lequel poser
+  /// lui-même le curseur système : c'est donc la fenêtre Flutter (via ce
+  /// `MouseRegion`) qui doit le faire.
+  MouseCursor _cursorFromKind(String kind) {
+    switch (kind) {
+      case 'click':
+        return SystemMouseCursors.click;
+      case 'text':
+        return SystemMouseCursors.text;
+      case 'wait':
+        return SystemMouseCursors.wait;
+      case 'precise':
+        return SystemMouseCursors.precise;
+      case 'resizeLeftRight':
+        return SystemMouseCursors.resizeLeftRight;
+      case 'resizeUpDown':
+        return SystemMouseCursors.resizeUpDown;
+      case 'allScroll':
+        return SystemMouseCursors.allScroll;
+      case 'forbidden':
+        return SystemMouseCursors.forbidden;
+      case 'basic':
+      default:
+        return SystemMouseCursors.basic;
+    }
+  }
+
   int _buttonFromPointerButtons(int buttons) {
     if ((buttons & kPrimaryMouseButton) != 0) return _kPrimaryMouseButton;
     if ((buttons & kSecondaryMouseButton) != 0) return _kSecondaryMouseButton;
@@ -282,84 +373,87 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
         return true;
       },
       child: SizeChangedLayoutNotifier(
-        child: Listener(
-          onPointerHover: (event) {
-            _globalWindowsChannel.invokeMethod('setCursorPos', {
-              'viewId': _windowsViewId,
-              'x': event.localPosition.dx,
-              'y': event.localPosition.dy,
-            });
-          },
-          onPointerDown: (event) {
-            _globalWindowsChannel.invokeMethod('setCursorPos', {
-              'viewId': _windowsViewId,
-              'x': event.localPosition.dx,
-              'y': event.localPosition.dy,
-            });
-            final button = _buttonFromPointerButtons(event.buttons);
-            if (button != 0) {
-              _downButtons[event.pointer] = button;
-              _globalWindowsChannel.invokeMethod('setPointerButton', {
+        child: MouseRegion(
+          cursor: _windowsCursor,
+          child: Listener(
+            onPointerHover: (event) {
+              _globalWindowsChannel.invokeMethod('setCursorPos', {
                 'viewId': _windowsViewId,
-                'button': button,
-                'isDown': true,
+                'x': event.localPosition.dx,
+                'y': event.localPosition.dy,
               });
-            }
-          },
-          onPointerUp: (event) {
-            final button = _downButtons.remove(event.pointer);
-            if (button != null) {
-              _globalWindowsChannel.invokeMethod('setPointerButton', {
+            },
+            onPointerDown: (event) {
+              _globalWindowsChannel.invokeMethod('setCursorPos', {
                 'viewId': _windowsViewId,
-                'button': button,
-                'isDown': false,
+                'x': event.localPosition.dx,
+                'y': event.localPosition.dy,
               });
-            }
-          },
-          onPointerCancel: (event) {
-            final button = _downButtons.remove(event.pointer);
-            if (button != null) {
-              _globalWindowsChannel.invokeMethod('setPointerButton', {
+              final button = _buttonFromPointerButtons(event.buttons);
+              if (button != 0) {
+                _downButtons[event.pointer] = button;
+                _globalWindowsChannel.invokeMethod('setPointerButton', {
+                  'viewId': _windowsViewId,
+                  'button': button,
+                  'isDown': true,
+                });
+              }
+            },
+            onPointerUp: (event) {
+              final button = _downButtons.remove(event.pointer);
+              if (button != null) {
+                _globalWindowsChannel.invokeMethod('setPointerButton', {
+                  'viewId': _windowsViewId,
+                  'button': button,
+                  'isDown': false,
+                });
+              }
+            },
+            onPointerCancel: (event) {
+              final button = _downButtons.remove(event.pointer);
+              if (button != null) {
+                _globalWindowsChannel.invokeMethod('setPointerButton', {
+                  'viewId': _windowsViewId,
+                  'button': button,
+                  'isDown': false,
+                });
+              }
+            },
+            onPointerMove: (event) {
+              _globalWindowsChannel.invokeMethod('setCursorPos', {
                 'viewId': _windowsViewId,
-                'button': button,
-                'isDown': false,
+                'x': event.localPosition.dx,
+                'y': event.localPosition.dy,
               });
-            }
-          },
-          onPointerMove: (event) {
-            _globalWindowsChannel.invokeMethod('setCursorPos', {
-              'viewId': _windowsViewId,
-              'x': event.localPosition.dx,
-              'y': event.localPosition.dy,
-            });
-          },
-          onPointerSignal: (signal) {
-            if (signal is PointerScrollEvent) {
-              _globalWindowsChannel.invokeMethod('setScrollDelta', {
-                'viewId': _windowsViewId,
-                'dx': -signal.scrollDelta.dx,
-                'dy': -signal.scrollDelta.dy,
-              });
-            }
-          },
-          onPointerPanZoomUpdate: (signal) {
-            if (signal.panDelta.dx.abs() > signal.panDelta.dy.abs()) {
-              _globalWindowsChannel.invokeMethod('setScrollDelta', {
-                'viewId': _windowsViewId,
-                'dx': -signal.panDelta.dx,
-                'dy': 0.0,
-              });
-            } else {
-              _globalWindowsChannel.invokeMethod('setScrollDelta', {
-                'viewId': _windowsViewId,
-                'dx': 0.0,
-                'dy': signal.panDelta.dy,
-              });
-            }
-          },
-          child: Texture(
-            textureId: _windowsTextureId!,
-            filterQuality: widget.filterQuality,
+            },
+            onPointerSignal: (signal) {
+              if (signal is PointerScrollEvent) {
+                _globalWindowsChannel.invokeMethod('setScrollDelta', {
+                  'viewId': _windowsViewId,
+                  'dx': -signal.scrollDelta.dx,
+                  'dy': -signal.scrollDelta.dy,
+                });
+              }
+            },
+            onPointerPanZoomUpdate: (signal) {
+              if (signal.panDelta.dx.abs() > signal.panDelta.dy.abs()) {
+                _globalWindowsChannel.invokeMethod('setScrollDelta', {
+                  'viewId': _windowsViewId,
+                  'dx': -signal.panDelta.dx,
+                  'dy': 0.0,
+                });
+              } else {
+                _globalWindowsChannel.invokeMethod('setScrollDelta', {
+                  'viewId': _windowsViewId,
+                  'dx': 0.0,
+                  'dy': signal.panDelta.dy,
+                });
+              }
+            },
+            child: Texture(
+              textureId: _windowsTextureId!,
+              filterQuality: widget.filterQuality,
+            ),
           ),
         ),
       ),
@@ -373,7 +467,7 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
         initialUrl: widget.initialUrl,
         initialAsset: widget.initialAsset,
         onMessageReceived: widget.onMessageReceived,
-        onNavigationRequest: _effectiveNavigationCallback,
+        onNavigationRequest: widget.onNavigationRequest,
         onControllerCreated: _handleControllerCreated,
       );
     }
@@ -399,6 +493,10 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
 
     switch (defaultTargetPlatform) {
       case TargetPlatform.android:
+        if (!_isAndroidReady) {
+          return const SizedBox.expand();
+        }
+
         if (widget.initialSettings.useHybridComposition) {
           return PlatformViewLink(
             viewType: _kViewType,
@@ -410,29 +508,45 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
               );
             },
             onCreatePlatformView: (params) {
-              return PlatformViewsService.initExpensiveAndroidView(
-                id: params.id,
-                viewType: _kViewType,
-                layoutDirection: widget.layoutDirection ?? TextDirection.ltr,
-                creationParams: creationParams,
-                creationParamsCodec: const StandardMessageCodec(),
-                onFocus: () => params.onFocusChanged(true),
-              )
-                ..addOnPlatformViewCreatedListener((id) {
-                  params.onPlatformViewCreated(id);
-                  _onPlatformViewCreated(id); // 💡 AJOUT ICI
-                })
-                ..create();
+              if(_androidHcppSupported) {
+                return PlatformViewsService.initHybridAndroidView(
+                  id: params.id,
+                  viewType: _kViewType,
+                  layoutDirection: widget.layoutDirection ?? TextDirection.ltr,
+                  creationParams: creationParams,
+                  creationParamsCodec: const StandardMessageCodec(),
+                  onFocus: () => params.onFocusChanged(true),
+                )..addOnPlatformViewCreatedListener((id) {
+                    params.onPlatformViewCreated(id);
+                    _onPlatformViewCreated(id);
+                  })
+                  ..create();
+              }
+              else {
+                return PlatformViewsService.initSurfaceAndroidView(
+                  id: params.id,
+                  viewType: _kViewType,
+                  layoutDirection: widget.layoutDirection ?? TextDirection.ltr,
+                  creationParams: creationParams,
+                  creationParamsCodec: const StandardMessageCodec(),
+                  onFocus: () => params.onFocusChanged(true),
+                )..addOnPlatformViewCreatedListener((id) {
+                    params.onPlatformViewCreated(id);
+                    _onPlatformViewCreated(id);
+                  })
+                  ..create();
+              }
             },
           );
-        } else {
+        } 
+        else {
           return AndroidView(
             viewType: _kViewType,
-            layoutDirection: widget.layoutDirection ?? TextDirection.ltr,
+            layoutDirection: widget.layoutDirection,
             gestureRecognizers: widget.gestureRecognizers,
             creationParams: creationParams,
             creationParamsCodec: const StandardMessageCodec(),
-            onPlatformViewCreated: _onPlatformViewCreated, // 💡 AJOUT ICI
+            onPlatformViewCreated: _onPlatformViewCreated
           );
         }
 
@@ -446,6 +560,8 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
           onPlatformViewCreated: _onPlatformViewCreated,
           creationParams: creationParams,
           creationParamsCodec: const StandardMessageCodec(),
+          layoutDirection: widget.layoutDirection,
+          gestureRecognizers: widget.gestureRecognizers,
         );
 
       case TargetPlatform.macOS:
@@ -457,6 +573,8 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
           onPlatformViewCreated: _onPlatformViewCreated,
           creationParams: creationParams,
           creationParamsCodec: const StandardMessageCodec(),
+          layoutDirection: widget.layoutDirection,
+          gestureRecognizers: widget.gestureRecognizers,
         );
 
       case TargetPlatform.windows:
@@ -494,10 +612,10 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
             defaultTargetPlatform == TargetPlatform.iOS);
     final controller = WebviewPlusController.init(
       id,
-      onNavigationRequest: _effectiveNavigationCallback,
+      onNavigationRequest: widget.onNavigationRequest,
       onMessageReceived: widget.onMessageReceived,
       onLoadStart: widget.onLoadStart,
-      onLoadStop: _effectiveOnLoadStop,
+      onLoadStop: widget.onLoadStop,
       onReceivedError: widget.onReceivedError,
       contextMenuItems: supportsContextMenuItems ? widget.contextMenuItems : const [],
     );
@@ -506,7 +624,7 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
 
   void _handleControllerCreated(WebviewPlatformController controller) {
     if (controller is WebviewPlusController) {
-      widget.onWebviewCreated?.call(controller);
+      widget.onWebViewCreated?.call(controller);
     }
   }
 

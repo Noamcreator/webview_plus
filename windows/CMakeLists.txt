@@ -54,6 +54,12 @@ target_include_directories(${PLUGIN_NAME} INTERFACE
 target_link_libraries(${PLUGIN_NAME} PRIVATE flutter flutter_wrapper_plugin)
 target_link_libraries(${PLUGIN_NAME} PRIVATE "${WEBVIEW2_LIB}")
 target_link_libraries(${PLUGIN_NAME} PRIVATE d3d11 dxgi windowsapp)
+# Comctl32 : requis par SetWindowSubclass/DefSubclassProc/RemoveWindowSubclass
+# (util/window_subclass), utilisés pour détecter les déplacements de la
+# fenêtre top-level (WM_MOVE / WM_WINDOWPOSCHANGED) et notifier WebView2 en
+# conséquence via NotifyParentWindowPositionChanged (fix du menu contextuel
+# mal positionné en mode fenêtré).
+target_link_libraries(${PLUGIN_NAME} PRIVATE comctl32)
 
 set(webview_plus_bundled_libraries
   ""
