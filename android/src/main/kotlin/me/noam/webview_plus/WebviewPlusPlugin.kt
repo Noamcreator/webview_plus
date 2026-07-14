@@ -1,6 +1,7 @@
 package me.noam.webview_plus
 
 import android.app.Activity
+import android.content.Context
 import android.os.Build
 import android.view.ActionMode
 import android.view.Window
@@ -13,16 +14,21 @@ import io.flutter.plugin.common.MethodChannel
 class WebviewPlusPlugin : FlutterPlugin, ActivityAware {
 
     private var factory: WebviewPlusFactory? = null
+    private var appContext: Context? = null
 
     // Canal global (indépendant de chaque instance de Webview) permettant
     // au côté Dart de connaître l'API level Android au runtime, afin de
     // choisir entre `initSurfaceAndroidView` (Texture Layer Hybrid
     // Composition, nécessite API 23+) et les modes historiques
     // (`initExpensiveAndroidView` / Virtual Display) sur les appareils
-    // plus anciens. Voir `webview_plus_widget.dart` (_getAndroidSdkInt).
+    // plus anciens (voir `webview_plus_widget.dart`, `_getAndroidSdkInt`),
+    // ainsi que le préchauffage/préchargement de Webview (voir
+    // `WebviewPlusPreloader` côté natif et son pendant côté Dart dans
+    // `webview_plus_controller.dart`).
     private var infoChannel: MethodChannel? = null
 
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
+        appContext = binding.applicationContext
         factory = WebviewPlusFactory(
             binding.binaryMessenger,
             binding.applicationContext
@@ -34,8 +40,29 @@ class WebviewPlusPlugin : FlutterPlugin, ActivityAware {
 
         infoChannel = MethodChannel(binding.binaryMessenger, "plugins.noam.me/webview_plus_info")
         infoChannel?.setMethodCallHandler { call, result ->
+            val ctx = appContext
             when (call.method) {
                 "getSdkInt" -> result.success(Build.VERSION.SDK_INT)
+                "warmUp" -> {
+                    if (ctx == null) {
+                        result.error("NO_CONTEXT", "Plugin non attaché", null)
+                    } else {
+                        val count = (call.argument<Int>("count") ?: 1).coerceIn(1, 5)
+                        WebviewPlusPreloader.warmUp(ctx, count)
+                        result.success(null)
+                    }
+                }
+                "preloadUrl" -> {
+                    val url = call.argument<String>("url")
+                    if (ctx == null) {
+                        result.error("NO_CONTEXT", "Plugin non attaché", null)
+                    } else if (url == null) {
+                        result.error("INVALID_ARGUMENT", "url manquante", null)
+                    } else {
+                        WebviewPlusPreloader.preloadUrl(ctx, url)
+                        result.success(null)
+                    }
+                }
                 else -> result.notImplemented()
             }
         }
@@ -45,6 +72,8 @@ class WebviewPlusPlugin : FlutterPlugin, ActivityAware {
         factory = null
         infoChannel?.setMethodCallHandler(null)
         infoChannel = null
+        appContext = null
+        WebviewPlusPreloader.clear()
     }
 
     // -- ActivityAware --------------------------------------------------

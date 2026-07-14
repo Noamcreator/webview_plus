@@ -406,7 +406,7 @@ WebViewPlusInstance::WebViewPlusInstance(
             LoadHtmlOrData(Utf8ToWide(std::get<std::string>(it->second)));
           }
           result->Success();
-        } else if (method == "evaluateJavaScript" && args) {
+        } else if (method == "evaluateJavascript" && args) {
           auto it = args->find(EncodableValue("code"));
           if (it != args->end()) {
             auto shared_result =

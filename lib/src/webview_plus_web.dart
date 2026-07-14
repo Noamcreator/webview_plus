@@ -82,7 +82,7 @@ class WebviewPlusWebController implements WebviewPlatformController {
   }
 
   @override
-  Future<String?> evaluateJavaScript(String code) async {
+  Future<String?> evaluateJavascript(String code) async {
     try {
       final jsWin = _win;
       if (jsWin == null) return null;
@@ -95,12 +95,12 @@ class WebviewPlusWebController implements WebviewPlatformController {
 
   @override
   Future<String?> getHtml() {
-    return evaluateJavaScript('document.documentElement.outerHTML');
+    return evaluateJavascript('document.documentElement.outerHTML');
   }
 
   @override
   Future<void> injectJavascriptFileFromUrl(String urlFile) async {
-    await evaluateJavaScript(
+    await evaluateJavascript(
       "(function(){var s=document.createElement('script');s.src='${_escape(urlFile)}';document.head.appendChild(s);})();",
     );
   }
@@ -112,7 +112,7 @@ class WebviewPlusWebController implements WebviewPlatformController {
 
   @override
   Future<void> injectCSSFileFromUrl(String urlFile) async {
-    await evaluateJavaScript(
+    await evaluateJavascript(
       "(function(){var l=document.createElement('link');l.rel='stylesheet';l.href='${_escape(urlFile)}';document.head.appendChild(l);})();",
     );
   }

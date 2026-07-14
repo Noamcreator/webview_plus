@@ -122,8 +122,8 @@ class _WebviewDemoPageState extends State<WebviewDemoPage> {
   Future<void> _runJs() async {
     final code = _jsFieldController.text.trim();
     if (code.isEmpty) return;
-    final result = await _controller?.evaluateJavaScript(code);
-    _pushLog('evaluateJavaScript("$code") -> $result');
+    final result = await _controller?.evaluateJavascript(code);
+    _pushLog('evaluateJavascript("$code") -> $result');
   }
 
   Future<void> _getHtml() async {
@@ -190,7 +190,7 @@ class _WebviewDemoPageState extends State<WebviewDemoPage> {
     );
     await Future<void>.delayed(const Duration(milliseconds: 800));
     final result =
-        await _controller?.evaluateJavaScript("typeof window.jQuery");
+        await _controller?.evaluateJavascript("typeof window.jQuery");
     _pushLog('Injection JS distante -> typeof jQuery = $result');
   }
 

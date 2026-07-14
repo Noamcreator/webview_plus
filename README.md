@@ -10,7 +10,7 @@ Unlike other webview implementations that introduce complex virtualization layer
 
 | Platform | Encapsulated Native Component | Backend Layer / Architecture |
 | :--- | :--- | :--- |
-| **Android** | `android.webkit.Webview` | Native `PlatformView` (with Hybrid Composition support) |
+| **Android** | `android.webkit.Webview` | Native `PlatformView`, using **Texture Layer Hybrid Composition** by default (API 23+) — native-speed scrolling *and* smooth Flutter animations around it |
 | **iOS** | `WKWebview` (WebKit) | Native `UiKitView` (Full native composition) |
 | **macOS** | `WKWebview` (WebKit) | Native `AppKitView` (Full native composition) |
 | **Windows** | `Webview2` (Edge Chromium) | Win32 Composition over Flutter Direct3D Texture |
@@ -23,11 +23,13 @@ Unlike other webview implementations that introduce complex virtualization layer
 
 - **True Native Embedding:** Zero unnecessary wrappers. Uses `WKWebview` on Apple platforms, Chromium-based `Webview2` on Windows, and `WebKitGTK` on Linux.
 - **Bi-directional JavaScript Bridge:** 
-  - Execute Dart to JS via `evaluateJavaScript` with **automatic type unboxing** (returns real Dart types like `int`, `Map`, `List` instead of raw strings).
+  - Execute Dart to JS via `evaluateJavascript` with **automatic type unboxing** (returns real Dart types like `int`, `Map`, `List` instead of raw strings).
   - Handle JS to Dart messages using either basic string streaming or full-featured promises via `window.webview_plus.callHandler`.
 - **Custom Native Context Menus:** Fully customize text selection and long-press contextual menus on Android and iOS using native platform APIs (`ActionMode` & `UIContextMenuConfiguration`).
 - **Comprehensive Lifecycle Callbacks:** Track page loading starts, stops, navigation interception, and handle platform-specific web view errors.
 - **Advanced Asset & File System Access:** Load URLs, bundle assets, or absolute file paths from the local device storage.
+- **Android Rendering Performance:** Defaults to Texture Layer Hybrid Composition (`initSurfaceAndroidView`) on API 23+, giving native-speed scrolling without the janky Flutter animations/transitions that plague classic Hybrid Composition. Automatically falls back to legacy modes on older devices.
+- **Android Preloading API:** `WebviewPlusPreloader` lets you warm up the WebView engine and/or prefetch a URL into the shared HTTP cache *before* the user opens a webview screen, for a near-instant first paint. See [Preloading & Faster First Load](#-preloading--faster-first-load-android) below.
 
 ---
 
@@ -81,10 +83,10 @@ Forget manual JSON parsing. When evaluating JavaScript, the native bridge deseri
 
 ```dart
 // Evaluate arithmetic or complex data structures
-final dynamic result = await controller.evaluateJavaScript('1 + 1'); 
+final dynamic result = await controller.evaluateJavascript('1 + 1'); 
 print(result); // Outputs: 2 (as an int, not a String "2"!)
 
-final Map<String, dynamic> user = await controller.evaluateJavaScript('''
+final Map<String, dynamic> user = await controller.evaluateJavascript('''
   (function() {
     return { name: "Noam", roles: ["admin", "developer"] };
   })()
@@ -162,13 +164,54 @@ The `WebviewPlusController` exposes full programmatic control over the browser s
 | `loadFile(String filePath)` | Absolute filesystem lookup. Loads local files on the device disk. |
 | `loadHtmlString(String html, {String? baseUrl})` | Loads a raw HTML string into the webview component directly. |
 | `loadData(...)` | Advanced alternative to `loadHtmlString` supporting explicit custom `mimeType` (e.g. `image/svg+xml`) and `encoding`. |
-| `evaluateJavaScript(String code)` | Runs arbitrary JS in the document scope and retrieves automatically unboxed Dart objects. |
+| `evaluateJavascript(String code)` | Runs arbitrary JS in the document scope and retrieves automatically unboxed Dart objects. |
 | `getHtml()` | Helper that queries and returns `document.documentElement.outerHTML`. |
 | `injectJavascriptFileFromUrl / Asset` | Injects an external or asset-based `<script>` file straight into the live DOM tree. |
 | `injectCSSFileFromUrl / Asset` | Appends remote stylesheets or asset-based CSS rules into the live DOM layout. |
 | `goBack() / goForward()` | Navigates backwards or forwards through the session browsing history stack. |
 | `canGoBack() / canGoForward()` | Evaluates whether historical steps are available in either direction. |
 | `reload()` | Triggers a fresh reload of the current active webpage structure. |
+
+---
+
+## ⚡ Preloading & Faster First Load (Android)
+
+Android's `WebView` pays a one-time cost the first time it's ever instantiated in your app process — loading the Chromium engine, spinning up the sandboxed `:webview_service` process, etc. That cost is *per process*, not per instance, which means:
+
+- Every webview **after** the first one in your app is already fast.
+- The **first** webview the user ever opens takes the hit, right when they're waiting for it.
+
+`WebviewPlusPreloader` gives you two independent, Android-only tools (silent no-ops on other platforms) to move that cost out of the user's way.
+
+### Engine warm-up
+
+Pre-builds blank `WebView` instances in the background so the first real `WebviewWidget` the user opens doesn't have to pay the engine init cost itself.
+
+```dart
+void main() {
+  runApp(const MyApp());
+  WidgetsBinding.instance.addPostFrameCallback((_) {
+    WebviewPlusPreloader.warmUp(count: 1); // 1–5, call once after the first frame
+  });
+}
+```
+
+### URL preloading
+
+Fetches a URL in the background using an invisible, disposable webview, filling the shared HTTP cache so the real webview that loads the same URL later gets it (partly or fully) from cache instead of the network.
+
+```dart
+// e.g. as soon as an article list is shown, warm the article the user
+// is most likely to open next
+WebviewPlusPreloader.preloadUrl('https://example.com/article/123');
+```
+
+| Method | Description |
+| :--- | :--- |
+| `warmUp({int count = 1})` | Pre-builds `count` (1–5) blank `WebView` engine instances ahead of time. |
+| `preloadUrl(String url)` | Loads `url` in the background to warm the shared HTTP cache for that page. |
+
+> **Note:** `preloadUrl` is best-effort — it relies entirely on the target server's HTTP caching headers (`Cache-Control`, `ETag`, etc.). If a resource is served with `no-store` or similar, preloading it simply has no measurable effect; it won't error, it just won't help for that resource.
 
 ---
 
@@ -203,7 +246,7 @@ const WebviewSettings(
 | `disableContextMenu` | `false` | Android/iOS | Disables long-press menus and touch selection interactions completely. |
 | `disableLongPressContextMenuOnLinks`| `false` | Android/iOS | Prevents special links preview/copy contextual windows specifically. |
 | `selectionHandleColor` | `null` | Android | *Best effort:* Stylizes text highlight color boundaries via runtime CSS injection. |
-| `useHybridComposition` | `true` | Android | Forces heavy rendering through native surface. Fixes scrolling and layout overlapping bugs. |
+| `useHybridComposition` | `true` | Android | **Fallback only, API < 23.** On API 23+, the plugin always uses Texture Layer Hybrid Composition (best of both worlds) regardless of this flag. Below API 23, `true` uses classic Hybrid Composition (correct native behavior, but can be janky during Flutter animations), `false` uses Virtual Display (smooth Flutter animations, but slightly less fluid native scroll). |
 | `allowsBackForwardNavigationGestures`| `false` | iOS | Enables edge swipe gesture history forward/backward navigations. |
 | `allowsLinkPreview` | `false` | iOS | Enables 3D Touch/Long Press link "Peek and Pop" preview panels. |
 | `disableLinkHoverPreview` | `true` | Desktop | Hides status bar hover URL strings appearing at the bottom of the pane (Windows). |
@@ -230,6 +273,8 @@ Add this code in DebugProfile.entitlements and Release.entitlements to have acce
 - **Windows & Linux (Advanced Composition):** Both Windows (`Webview2`) and Linux (`WebKitWebview`) use simplified window rendering strategies. True seamless stacking layouts (advanced transparency masks, multi-layered Flutter widgets directly over or under the web layer) may require unique configurations within the specific target OS shell runner.
 - **Linux Overlay Architecture:** Since Linux lacks generic `PlatformView` composition hooks inside Flutter's engine core, this plugin binds a direct native `GtkWidget` on top of the Flutter window frame coordinates dynamically. Size, placement, and lifecycle updates are synchronised directly over global method channels.
 - **Web Iframes Constraints:** `onNavigationRequest` is fully dependable only when loading content with matching origins (such as local bundled assets). Standard web browser security frames block cross-origin navigation interceptions on independent `<iframe>` nodes.
+- **Android Composition Mode Detection:** The plugin queries the device's API level asynchronously on first use and optimistically assumes API 23+ (Texture Layer Hybrid Composition) while that check is in flight — accurate for the vast majority of active devices. On the rare API < 23 device, the widget seamlessly rebuilds with the correct legacy mode once the check resolves, which may cause a single, barely noticeable extra rebuild the very first time a webview is shown in the app's lifetime.
+- **`preloadUrl` Has No Effect on Uncacheable Content:** Preloading only helps for resources the server allows to be cached (see [Preloading & Faster First Load](#-preloading--faster-first-load-android)).
 
 ---
 

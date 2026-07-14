@@ -10,4 +10,5 @@ export 'src/webview_plus_controller.dart'
         WebviewLoadCallback,
         WebviewErrorCallback,
         JavaScriptHandlerCallback,
-        WebviewCreatedCallback;
+        WebviewCreatedCallback,
+        WebviewPlusPreloader;

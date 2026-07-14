@@ -12,6 +12,7 @@ import android.view.View
 import android.webkit.JavascriptInterface
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
+import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import io.flutter.plugin.common.BinaryMessenger
@@ -28,7 +29,8 @@ class WebviewPlusPlatformView(
     context: Context,
     messenger: BinaryMessenger,
     viewId: Int,
-    creationParams: Map<String, Any?>?
+    creationParams: Map<String, Any?>?,
+    preWarmedWebView: WebView? = null
 ) : PlatformView, MethodChannel.MethodCallHandler {
 
     companion object {
@@ -47,7 +49,12 @@ class WebviewPlusPlatformView(
         fun forWebview(webView: WebView): WebviewPlusPlatformView? = registry[webView]
     }
 
-    private val webView: WebView = WebView(context)
+    // Réutilise l'instance fournie par WebviewPlusPreloader.warmUp (via
+    // WebviewPlusFactory) si disponible ; ces instances sont garanties
+    // "vierges" (jamais `loadUrl` appelé dessus), donc aucun risque de
+    // rater un évènement onLoadStart/onLoadStop côté Dart en les réutilisant
+    // ici comme si elles venaient d'être construites normalement.
+    private val webView: WebView = preWarmedWebView ?: WebView(context)
     private val channel = MethodChannel(messenger, "webview_plus_$viewId")
     private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -100,6 +107,15 @@ class WebviewPlusPlatformView(
     private fun setupWebview(context: Context, settings: Map<String, Any?>?) {
         // Optimisation matérielle pour un défilement fluide
         webView.setLayerType(View.LAYER_TYPE_HARDWARE, null)
+
+        // Supprime l'effet "glow" en haut/bas de page au scroll : évite un
+        // repaint supplémentaire à chaque frame de dépassement de bord.
+        webView.overScrollMode = View.OVER_SCROLL_NEVER
+
+        // Permet à la WebView de coopérer avec un éventuel ancêtre à
+        // défilement imbriqué (nested scrolling), pour un fling plus
+        // continu lorsqu'elle est composée avec d'autres vues à défilement.
+        webView.isNestedScrollingEnabled = true
 
         applySettings(settings)
 
@@ -237,6 +253,21 @@ class WebviewPlusPlatformView(
         s.displayZoomControls = (settings?.get("displayZoomControls") as? Boolean) ?: false
         s.mediaPlaybackRequiresUserGesture =
             (settings?.get("mediaPlaybackRequiresUserGesture") as? Boolean) ?: true
+
+        // Cache HTTP standard (respecte les en-têtes serveur type
+        // Cache-Control/ETag) : c'est déjà la valeur par défaut d'Android,
+        // on la rend explicite ici car c'est elle qui permet à
+        // `WebviewPlusPreloader.preloadUrl` d'accélérer les chargements
+        // suivants de la même URL (cache partagé entre toutes les
+        // instances WebView de l'app).
+        s.cacheMode = WebSettings.LOAD_DEFAULT
+
+        // Évite un premier rendu "zoomé" en desktop puis un re-layout vers
+        // la taille mobile sur les pages sans meta viewport adapté :
+        // accélère le premier paint perçu par l'utilisateur. Ignoré par
+        // les pages qui définissent déjà leur propre meta viewport.
+        s.useWideViewPort = (settings?.get("useWideViewPort") as? Boolean) ?: true
+        s.loadWithOverviewMode = (settings?.get("loadWithOverviewMode") as? Boolean) ?: true
 
         (settings?.get("userAgent") as? String)?.let { s.userAgentString = it }
 
@@ -550,7 +581,7 @@ class WebviewPlusPlatformView(
                     result.error("INVALID_ARGUMENT", "Data manquante", null)
                 }
             }
-            "evaluateJavaScript" -> {
+            "evaluateJavascript" -> {
                 val code = call.argument<String>("code")
                 if (code != null) {
                     webView.evaluateJavascript(code) { value ->

@@ -263,7 +263,7 @@ class WebviewPlusPlatformView: NSObject, FlutterPlatformView {
     }
 
     private func runScriptSafely(_ script: String) {
-        webView.evaluateJavaScript(script, completionHandler: nil)
+        webView.evaluateJavascript(script, completionHandler: nil)
     }
 
     // MARK: - Chargement
@@ -292,13 +292,13 @@ class WebviewPlusPlatformView: NSObject, FlutterPlatformView {
     private func injectScriptFromUrl(_ urlFile: String) {
         let js = "(function(){var s=document.createElement('script');s.src=\(JsonLiteral.encode(urlFile));" +
             "(document.head||document.documentElement).appendChild(s);})();"
-        webView.evaluateJavaScript(js, completionHandler: nil)
+        webView.evaluateJavascript(js, completionHandler: nil)
     }
 
     private func injectCssFromUrl(_ urlFile: String) {
         let js = "(function(){var l=document.createElement('link');l.rel='stylesheet';l.href=\(JsonLiteral.encode(urlFile));" +
             "(document.head||document.documentElement).appendChild(l);})();"
-        webView.evaluateJavaScript(js, completionHandler: nil)
+        webView.evaluateJavascript(js, completionHandler: nil)
     }
 
     private func assetUrl(_ assetPath: String) -> String {
@@ -366,7 +366,7 @@ class WebviewPlusPlatformView: NSObject, FlutterPlatformView {
             )
             result(nil)
 
-        case "evaluateJavaScript":
+        case "evaluateJavascript":
             guard let args = call.arguments as? [String: Any], let code = args["code"] as? String else {
                 result(FlutterError(code: "INVALID_ARGUMENT", message: "code manquant", details: nil))
                 return
@@ -376,7 +376,7 @@ class WebviewPlusPlatformView: NSObject, FlutterPlatformView {
             // NSNull), directement compatibles avec StandardMethodCodec :
             // aucun décodage JSON manuel n'est nécessaire ici (contrairement
             // à Android/Windows où le résultat est une chaîne JSON brute).
-            webView.evaluateJavaScript(code) { value, error in
+            webView.evaluateJavascript(code) { value, error in
                 if let error = error {
                     result(FlutterError(code: "JS_ERROR", message: error.localizedDescription, details: nil))
                     return
@@ -385,7 +385,7 @@ class WebviewPlusPlatformView: NSObject, FlutterPlatformView {
             }
 
         case "getHtml":
-            webView.evaluateJavaScript("document.documentElement.outerHTML") { value, _ in
+            webView.evaluateJavascript("document.documentElement.outerHTML") { value, _ in
                 result(value as? String)
             }
 
@@ -557,7 +557,7 @@ extension WebviewPlusPlatformView: WKUIDelegate {
     /// `WebviewPlusPlatformView.invokeCustomContextMenuAction` côté
     /// Kotlin).
     private func invokeCustomContextMenuAction(id: String) {
-        webView.evaluateJavaScript("window.getSelection ? window.getSelection().toString() : '';") {
+        webView.evaluateJavascript("window.getSelection ? window.getSelection().toString() : '';") {
             [weak self] value, _ in
             let text = value as? String ?? ""
             self?.channel.invokeMethod("onContextMenuAction", arguments: ["id": id, "text": text])
@@ -611,7 +611,7 @@ private class LeakAvoidingScriptMessageHandler: NSObject, WKScriptMessageHandler
 
 /// Encode une valeur Dart (String/NSNumber/Bool/Array/Dictionary/nil) en un
 /// littéral JS/JSON valide, embarquable tel quel dans un appel à
-/// `evaluateJavaScript`.
+/// `evaluateJavascript`.
 enum JsonLiteral {
     static func encode(_ value: Any?) -> String {
         guard let value = value, !(value is NSNull) else { return "null" }

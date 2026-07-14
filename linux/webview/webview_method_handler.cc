@@ -33,7 +33,7 @@ void inject_css_from_url(WebKitWebview *web_view, const gchar *url) {
                                       nullptr, nullptr, nullptr);
 }
 
-// -- evaluateJavaScript --------------------------------------------------
+// -- evaluateJavascript --------------------------------------------------
 
 void eval_finished_cb(GObject *object, GAsyncResult *result, gpointer user_data) {
   FlMethodCall *method_call = FL_METHOD_CALL(user_data);
@@ -161,7 +161,7 @@ void handle_instance_method_call(LinuxWebview *webview,
     return;
   }
 
-  if (strcmp(method, "evaluateJavaScript") == 0) {
+  if (strcmp(method, "evaluateJavascript") == 0) {
     const gchar *code = map_lookup_string(args, "code");
     if (code == nullptr) {
       respond(method_call, error_response("invalid_argument", "code manquant."));

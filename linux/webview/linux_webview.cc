@@ -18,7 +18,7 @@ LinuxWebview *webview_from_object(gpointer object) {
 // flutter_linux : bien plus fiable qu'une sérialisation manuelle, et
 // utilisé aussi bien pour encoder les réponses natif -> JS que pour
 // décoder les résultats JS -> Dart (voir `evaluate_javascript`,
-// méthode "evaluateJavaScript" dans webview_method_handler.cc).
+// méthode "evaluateJavascript" dans webview_method_handler.cc).
 gchar *json_encode_value(FlValue *value) {
   g_autoptr(FlJsonMessageCodec) codec = fl_json_message_codec_new();
   g_autoptr(GError) error = nullptr;

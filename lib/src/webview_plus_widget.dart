@@ -89,8 +89,40 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
   static const MethodChannel _globalWindowsChannel = MethodChannel('plugins.noam.me/webview_plus_windows');
   static const MethodChannel _globalLinuxChannel = MethodChannel('plugins.noam.me/webview_plus_linux');
 
-  bool _androidHcppSupported = false;
-  bool _isAndroidReady = false;
+  // -- Détection du SDK Android (pour choisir le mode de composition) ----
+  //
+  // `PlatformViewsService.initSurfaceAndroidView` (Texture Layer Hybrid
+  // Composition) offre un scroll natif fluide dans la Webview *et* des
+  // transitions/animations Flutter fluides autour, contrairement à
+  // `initExpensiveAndroidView` (Hybrid Composition classique, jank pendant
+  // les animations) et à `AndroidView` seul (Virtual Display, scroll qui
+  // rame). Il nécessite cependant l'API 23+. Le résultat est mis en cache
+  // au niveau du process : un seul appel de canal pour toute l'app, quel
+  // que soit le nombre d'instances de WebviewWidget créées.
+  static const MethodChannel _globalInfoChannel = MethodChannel('plugins.noam.me/webview_plus_info');
+  static int? _cachedAndroidSdkInt;
+
+  static Future<int> _getAndroidSdkInt() async {
+    final cached = _cachedAndroidSdkInt;
+    if (cached != null) return cached;
+    int sdk;
+    try {
+      sdk = await _globalInfoChannel.invokeMethod<int>('getSdkInt') ?? 23;
+    } catch (_) {
+      // En cas d'échec (ancienne version du plugin natif, etc.), on reste
+      // conservateur et on suppose un appareil récent : c'est le cas de
+      // >99% du parc Android actif.
+      sdk = 23;
+    }
+    _cachedAndroidSdkInt = sdk;
+    return sdk;
+  }
+
+  // `null` tant que non résolu : on part de l'hypothèse optimiste (SDK
+  // 23+) pour ne pas retarder l'affichage de la Webview le temps du
+  // premier aller-retour de canal ; si l'appareil s'avère plus ancien, on
+  // bascule vers le mode adapté dès que `setState` déclenche un rebuild.
+  int? _androidSdkInt;
 
   int? _windowsViewId;
   int? _windowsTextureId;
@@ -119,23 +151,13 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
   }
 
   Future<void> _loadAndroidSdkInt() async {
-    try {
-      final hcppSupported = await HybridAndroidViewController.checkIfSupported();
-      
-      if (!mounted) return;
-
-      setState(() {
-        _androidHcppSupported = hcppSupported;
-        _isAndroidReady = true; // On signale que la configuration est prête !
-      });
-    } 
-    catch (e) {
-      debugPrint("Erreur lors de la configuration Android : $e");
-      if (mounted) {
-        setState(() {
-          _isAndroidReady = true; // Fallback pour ne pas bloquer l'interface en cas d'erreur
-        });
-      }
+    final sdk = await _getAndroidSdkInt();
+    if (!mounted) return;
+    // Ne redéclenche un rebuild que si la valeur change réellement le
+    // choix de mode (évite un setState inutile si on était déjà sur
+    // l'hypothèse optimiste par défaut).
+    if (_androidSdkInt != sdk) {
+      setState(() => _androidSdkInt = sdk);
     }
   }
 
@@ -458,11 +480,21 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
 
     switch (defaultTargetPlatform) {
       case TargetPlatform.android:
-        if (!_isAndroidReady) {
-          return const SizedBox.expand();
-        }
+        // Tant que le SDK réel n'est pas encore connu (aller-retour de
+        // canal asynchrone lancé dans initState), on part de l'hypothèse
+        // optimiste SDK >= 23 : c'est le cas de >99% du parc actif, et ça
+        // évite un flash / rebuild visible au premier affichage.
+        final int effectiveSdkInt = _androidSdkInt ?? 23;
+        final bool canUseSurfaceComposition = effectiveSdkInt >= 23;
 
-        if (widget.initialSettings.useHybridComposition) {
+        if (canUseSurfaceComposition) {
+          // Mode recommandé : "Texture Layer Hybrid Composition". La
+          // Webview est portée par un vrai SurfaceView (scroll natif
+          // fluide), tout en restant compatible avec les
+          // animations/transitions Flutter (Stack, Hero, Dialog...) car le
+          // moteur peut la snapshotter en texture uniquement pendant les
+          // transformations, sans forcer ça en continu comme le fait
+          // `initExpensiveAndroidView`.
           return PlatformViewLink(
             viewType: _kViewType,
             surfaceFactory: (context, controller) {
@@ -473,45 +505,61 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
               );
             },
             onCreatePlatformView: (params) {
-              if(_androidHcppSupported) {
-                return PlatformViewsService.initHybridAndroidView(
-                  id: params.id,
-                  viewType: _kViewType,
-                  layoutDirection: widget.layoutDirection ?? TextDirection.ltr,
-                  creationParams: creationParams,
-                  creationParamsCodec: const StandardMessageCodec(),
-                  onFocus: () => params.onFocusChanged(true),
-                )..addOnPlatformViewCreatedListener((id) {
-                    params.onPlatformViewCreated(id);
-                    _onPlatformViewCreated(id);
-                  })
-                  ..create();
-              }
-              else {
-                return PlatformViewsService.initSurfaceAndroidView(
-                  id: params.id,
-                  viewType: _kViewType,
-                  layoutDirection: widget.layoutDirection ?? TextDirection.ltr,
-                  creationParams: creationParams,
-                  creationParamsCodec: const StandardMessageCodec(),
-                  onFocus: () => params.onFocusChanged(true),
-                )..addOnPlatformViewCreatedListener((id) {
-                    params.onPlatformViewCreated(id);
-                    _onPlatformViewCreated(id);
-                  })
-                  ..create();
-              }
+              return PlatformViewsService.initSurfaceAndroidView(
+                id: params.id,
+                viewType: _kViewType,
+                layoutDirection: widget.layoutDirection ?? TextDirection.ltr,
+                creationParams: creationParams,
+                creationParamsCodec: const StandardMessageCodec(),
+                onFocus: () => params.onFocusChanged(true),
+              )
+                ..addOnPlatformViewCreatedListener((id) {
+                  params.onPlatformViewCreated(id);
+                  _onPlatformViewCreated(id);
+                })
+                ..create();
             },
           );
-        } 
-        else {
+        } else if (widget.initialSettings.useHybridComposition) {
+          // Repli pour les appareils < API 23 uniquement : ancienne Hybrid
+          // Composition (jank possible pendant les animations Flutter,
+          // mais comportement natif correct sinon).
+          return PlatformViewLink(
+            viewType: _kViewType,
+            surfaceFactory: (context, controller) {
+              return AndroidViewSurface(
+                controller: controller as AndroidViewController,
+                gestureRecognizers: widget.gestureRecognizers ?? const <Factory<OneSequenceGestureRecognizer>>{},
+                hitTestBehavior: PlatformViewHitTestBehavior.opaque,
+              );
+            },
+            onCreatePlatformView: (params) {
+              return PlatformViewsService.initExpensiveAndroidView(
+                id: params.id,
+                viewType: _kViewType,
+                layoutDirection: widget.layoutDirection ?? TextDirection.ltr,
+                creationParams: creationParams,
+                creationParamsCodec: const StandardMessageCodec(),
+                onFocus: () => params.onFocusChanged(true),
+              )
+                ..addOnPlatformViewCreatedListener((id) {
+                  params.onPlatformViewCreated(id);
+                  _onPlatformViewCreated(id);
+                })
+                ..create();
+            },
+          );
+        } else {
+          // Repli final pour les appareils < API 23 : Virtual Display
+          // (TextureView). Scroll moins fluide mais aucun risque de
+          // dysfonctionnement sur du très vieux matériel.
           return AndroidView(
             viewType: _kViewType,
-            layoutDirection: widget.layoutDirection,
+            layoutDirection: widget.layoutDirection ?? TextDirection.ltr,
             gestureRecognizers: widget.gestureRecognizers,
             creationParams: creationParams,
             creationParamsCodec: const StandardMessageCodec(),
-            onPlatformViewCreated: _onPlatformViewCreated
+            onPlatformViewCreated: _onPlatformViewCreated,
           );
         }
 
@@ -525,8 +573,6 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
           onPlatformViewCreated: _onPlatformViewCreated,
           creationParams: creationParams,
           creationParamsCodec: const StandardMessageCodec(),
-          layoutDirection: widget.layoutDirection,
-          gestureRecognizers: widget.gestureRecognizers,
         );
 
       case TargetPlatform.macOS:
@@ -538,8 +584,6 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
           onPlatformViewCreated: _onPlatformViewCreated,
           creationParams: creationParams,
           creationParamsCodec: const StandardMessageCodec(),
-          layoutDirection: widget.layoutDirection,
-          gestureRecognizers: widget.gestureRecognizers,
         );
 
       case TargetPlatform.windows:
