@@ -89,23 +89,6 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
   static const MethodChannel _globalWindowsChannel = MethodChannel('plugins.noam.me/webview_plus_windows');
   static const MethodChannel _globalLinuxChannel = MethodChannel('plugins.noam.me/webview_plus_linux');
 
-  // -- Détection du SDK Android (pour choisir le mode de composition) ----
-  //
-  // `PlatformViewsService.initSurfaceAndroidView` (Texture Layer Hybrid
-  // Composition) offre un scroll natif fluide dans la Webview *et* des
-  // transitions/animations Flutter fluides autour, contrairement à
-  // `initExpensiveAndroidView` (Hybrid Composition classique, jank pendant
-  // les animations) et à `AndroidView` seul (Virtual Display, scroll qui
-  // rame). Il nécessite cependant l'API 23+. Le résultat est mis en cache
-  // au niveau du process : un seul appel de canal pour toute l'app, quel
-  // que soit le nombre d'instances de WebviewWidget créées.
-  static const MethodChannel _globalInfoChannel = MethodChannel('plugins.noam.me/webview_plus_info');
-  static int? _cachedAndroidSdkInt;
-
-  // `null` tant que non résolu : on part de l'hypothèse optimiste (SDK
-  // 23+) pour ne pas retarder l'affichage de la Webview le temps du
-  // premier aller-retour de canal ; si l'appareil s'avère plus ancien, on
-  // bascule vers le mode adapté dès que `setState` déclenche un rebuild.
   bool _androidHcppSupported = false;
   bool _isAndroidReady = false;
 

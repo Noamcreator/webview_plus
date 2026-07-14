@@ -126,17 +126,6 @@ class _WebviewDemoPageState extends State<WebviewDemoPage> {
     _pushLog('evaluateJavaScript("$code") -> $result');
   }
 
-  Future<void> _callJsHandlerRoundTrip() async {
-    // Démontre le trajet complet JS -> Dart -> JS :
-    // la page appelle callHandler, le handler Dart répond, la Promise
-    // JS se résout et poste le résultat vers Dart via postMessage.
-    await _controller?.evaluateJavaScript(
-      "window.webview_plus && window.webview_plus.callHandler('fromJs', 'Bonjour', 42)"
-      ".then(function(r){ window.WebviewPlusChannel.postMessage('Résultat handler: ' + JSON.stringify(r)); })"
-      ".catch(function(e){ window.WebviewPlusChannel.postMessage('Erreur handler: ' + e); });",
-    );
-  }
-
   Future<void> _getHtml() async {
     final html = await _controller?.getHtml();
     if (!mounted) return;
