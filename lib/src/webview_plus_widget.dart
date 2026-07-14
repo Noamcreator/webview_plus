@@ -102,27 +102,10 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
   static const MethodChannel _globalInfoChannel = MethodChannel('plugins.noam.me/webview_plus_info');
   static int? _cachedAndroidSdkInt;
 
-  static Future<int> _getAndroidSdkInt() async {
-    final cached = _cachedAndroidSdkInt;
-    if (cached != null) return cached;
-    int sdk;
-    try {
-      sdk = await _globalInfoChannel.invokeMethod<int>('getSdkInt') ?? 23;
-    } catch (_) {
-      // En cas d'échec (ancienne version du plugin natif, etc.), on reste
-      // conservateur et on suppose un appareil récent : c'est le cas de
-      // >99% du parc Android actif.
-      sdk = 23;
-    }
-    _cachedAndroidSdkInt = sdk;
-    return sdk;
-  }
-
   // `null` tant que non résolu : on part de l'hypothèse optimiste (SDK
   // 23+) pour ne pas retarder l'affichage de la Webview le temps du
   // premier aller-retour de canal ; si l'appareil s'avère plus ancien, on
   // bascule vers le mode adapté dès que `setState` déclenche un rebuild.
-  int? _androidSdkInt;
   bool _androidHcppSupported = false;
   bool _isAndroidReady = false;
 
@@ -154,17 +137,16 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
 
   Future<void> _loadAndroidSdkInt() async {
     try {
-      final sdk = await _getAndroidSdkInt();
       final hcppSupported = await HybridAndroidViewController.checkIfSupported();
       
       if (!mounted) return;
 
       setState(() {
-        _androidSdkInt = sdk;
         _androidHcppSupported = hcppSupported;
         _isAndroidReady = true; // On signale que la configuration est prête !
       });
-    } catch (e) {
+    } 
+    catch (e) {
       debugPrint("Erreur lors de la configuration Android : $e");
       if (mounted) {
         setState(() {
