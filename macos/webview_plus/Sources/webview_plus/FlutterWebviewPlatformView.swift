@@ -294,7 +294,7 @@ class WebviewPlusPlatformView: WKWebView {
     }
 
     private func runScriptSafely(_ script: String) {
-        evaluateJavascript(script, completionHandler: nil)
+        evaluateJavaScript(script, completionHandler: nil)
     }
 
     // MARK: - Chargement
@@ -329,13 +329,13 @@ class WebviewPlusPlatformView: WKWebView {
     private func injectScriptFromUrl(_ urlFile: String) {
         let js = "(function(){var s=document.createElement('script');s.src=\(JsonLiteral.encode(urlFile));" +
             "(document.head||document.documentElement).appendChild(s);})();"
-        evaluateJavascript(js, completionHandler: nil)
+        evaluateJavaScript(js, completionHandler: nil)
     }
 
     private func injectCssFromUrl(_ urlFile: String) {
         let js = "(function(){var l=document.createElement('link');l.rel='stylesheet';l.href=\(JsonLiteral.encode(urlFile));" +
             "(document.head||document.documentElement).appendChild(l);})();"
-        evaluateJavascript(js, completionHandler: nil)
+        evaluateJavaScript(js, completionHandler: nil)
     }
 
     private func assetUrl(_ assetPath: String) -> String {
@@ -411,7 +411,7 @@ class WebviewPlusPlatformView: WKWebView {
             // WKWebView décode déjà nativement le résultat JS en types
             // Objective-C pontés (NSNumber/NSString/NSArray/NSDictionary/
             // NSNull), directement compatibles avec StandardMethodCodec.
-            evaluateJavascript(code) { value, error in
+            evaluateJavaScript(code) { value, error in
                 if let error = error {
                     result(FlutterError(code: "JS_ERROR", message: error.localizedDescription, details: nil))
                     return
@@ -420,7 +420,7 @@ class WebviewPlusPlatformView: WKWebView {
             }
 
         case "getHtml":
-            evaluateJavascript("document.documentElement.outerHTML") { value, _ in
+            evaluateJavaScript("document.documentElement.outerHTML") { value, _ in
                 result(value as? String)
             }
 
@@ -579,7 +579,7 @@ private class LeakAvoidingScriptMessageHandler: NSObject, WKScriptMessageHandler
 
 /// Encode une valeur Dart (String/NSNumber/Bool/Array/Dictionary/nil) en un
 /// littéral JS/JSON valide, embarquable tel quel dans un appel à
-/// `evaluateJavascript`.
+/// `evaluateJavaScript`.
 enum JsonLiteral {
     static func encode(_ value: Any?) -> String {
         guard let value = value, !(value is NSNull) else { return "null" }

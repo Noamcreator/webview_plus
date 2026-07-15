@@ -3,15 +3,15 @@ import UIKit
 import WebKit
 
 /// PlatformView natif iOS encapsulant un `WKWebView`, exposé côté Dart via
-/// `webview_plus_$viewId` (voir `WebviewPlusController` dans
-/// `lib/src/webview_plus_controller.dart`).
+/// `flutter_webview_$viewId` (voir `FlutterWebViewController` dans
+/// `lib/src/flutter_webview_controller.dart`).
 ///
 /// Reproduit fidèlement la surface fonctionnelle de l'implémentation
 /// Android/Windows : chargement (URL/asset/fichier/HTML/data), exécution JS
 /// avec retour `dynamic` décodé, injection JS/CSS, navigation, pont de
-/// messages (`WebviewPlusChannel.postMessage`) et pont de handlers
-/// (`window.webview_plus.callHandler`).
-class WebviewPlusPlatformView: NSObject, FlutterPlatformView {
+/// messages (`FlutterWebviewChannel.postMessage`) et pont de handlers
+/// (`window.flutter_webview.callHandler`).
+class FlutterWebviewPlatformView: NSObject, FlutterPlatformView {
     private let webView: ConfigurableWKWebView
     private let channel: FlutterMethodChannel
     private let viewId: Int64
@@ -37,7 +37,7 @@ class WebviewPlusPlatformView: NSObject, FlutterPlatformView {
         creationParams: [String: Any?]?
     ) {
         self.viewId = viewId
-        self.channel = FlutterMethodChannel(name: "webview_plus_\(viewId)", binaryMessenger: messenger)
+        self.channel = FlutterMethodChannel(name: "flutter_webview_\(viewId)", binaryMessenger: messenger)
 
         let configuration = WKWebViewConfiguration()
         let userContentController = WKUserContentController()
@@ -62,9 +62,9 @@ class WebviewPlusPlatformView: NSObject, FlutterPlatformView {
         webView.disabledActions = []
 
         userContentController.add(
-            LeakAvoidingScriptMessageHandler(self), name: "WebviewPlusChannel")
+            LeakAvoidingScriptMessageHandler(self), name: "FlutterWebviewChannel")
         userContentController.add(
-            LeakAvoidingScriptMessageHandler(self), name: "WebviewPlusJsHandler")
+            LeakAvoidingScriptMessageHandler(self), name: "FlutterWebviewJsHandler")
         userContentController.addUserScript(WKUserScript(
             source: bridgeScript(),
             injectionTime: .atDocumentStart,
@@ -174,8 +174,8 @@ class WebviewPlusPlatformView: NSObject, FlutterPlatformView {
     // MARK: - Pont JS <-> Dart
 
     /// Script injecté au tout début de chaque page : expose
-    /// `window.webview_plus.callHandler(...)` (pont vers
-    /// `addJavaScriptHandler` côté Dart) et `window.WebviewPlusChannel`
+    /// `window.flutter_webview.callHandler(...)` (pont vers
+    /// `addJavaScriptHandler` côté Dart) et `window.FlutterWebviewChannel`
     /// (pont vers `onMessageReceived`), plus le CSS de sélection éventuel.
     private func bridgeScript() -> String {
         let cssBlock: String
@@ -190,17 +190,17 @@ class WebviewPlusPlatformView: NSObject, FlutterPlatformView {
 
         return """
         (function(){
-          if (window.webview_plus) return;
+          if (window.flutter_webview) return;
           \(cssBlock)
           var __fwCbId = 0;
           var __fwCallbacks = {};
-          window.webview_plus = {
+          window.flutter_webview = {
             callHandler: function(handlerName) {
               var args = Array.prototype.slice.call(arguments, 1);
               var id = 'cb_' + (__fwCbId++);
               return new Promise(function(resolve, reject) {
                 __fwCallbacks[id] = { resolve: resolve, reject: reject };
-                window.webkit.messageHandlers.WebviewPlusJsHandler.postMessage({
+                window.webkit.messageHandlers.FlutterWebviewJsHandler.postMessage({
                   handlerName: handlerName, args: JSON.stringify(args), callbackId: id
                 });
               });
@@ -214,9 +214,9 @@ class WebviewPlusPlatformView: NSObject, FlutterPlatformView {
               if (cb) { cb.reject(error); delete __fwCallbacks[id]; }
             }
           };
-          window.WebviewPlusChannel = {
+          window.FlutterWebviewChannel = {
             postMessage: function(msg) {
-              window.webkit.messageHandlers.WebviewPlusChannel.postMessage(String(msg));
+              window.webkit.messageHandlers.FlutterWebviewChannel.postMessage(String(msg));
             }
           };
         })();
@@ -225,15 +225,15 @@ class WebviewPlusPlatformView: NSObject, FlutterPlatformView {
 
     fileprivate func handleScriptMessage(_ message: WKScriptMessage) {
         switch message.name {
-        case "WebviewPlusChannel":
+        case "FlutterWebviewChannel":
             if let text = message.body as? String {
                 channel.invokeMethod("onMessageReceived", arguments: text)
             }
-        case "WebviewPlusJsHandler":
+        case "FlutterWebviewJsHandler":
             guard let body = message.body as? [String: Any],
-                let handlerName = body["handlerName"] as? String,
-                let argsJson = body["args"] as? String,
-                let callbackId = body["callbackId"] as? String else { return }
+                  let handlerName = body["handlerName"] as? String,
+                  let argsJson = body["args"] as? String,
+                  let callbackId = body["callbackId"] as? String else { return }
 
             channel.invokeMethod(
                 "onJavaScriptHandler",
@@ -243,17 +243,17 @@ class WebviewPlusPlatformView: NSObject, FlutterPlatformView {
                 if let error = response as? FlutterError {
                     let literal = JsonLiteral.encode(error.message ?? error.code)
                     self.runScriptSafely(
-                        "window.webview_plus && window.webview_plus._rejectCallback('\(callbackId)', \(literal));"
+                        "window.flutter_webview && window.flutter_webview._rejectCallback('\(callbackId)', \(literal));"
                     )
-                } else if response as? NSObject == FlutterMethodNotImplemented { // <-- Ligne corrigée
+                } else if response is FlutterMethodNotImplemented {
                     let literal = JsonLiteral.encode("Aucun handler côté Dart nommé \"\(handlerName)\"")
                     self.runScriptSafely(
-                        "window.webview_plus && window.webview_plus._rejectCallback('\(callbackId)', \(literal));"
+                        "window.flutter_webview && window.flutter_webview._rejectCallback('\(callbackId)', \(literal));"
                     )
                 } else {
                     let literal = JsonLiteral.encode(response)
                     self.runScriptSafely(
-                        "window.webview_plus && window.webview_plus._resolveCallback('\(callbackId)', \(literal));"
+                        "window.flutter_webview && window.flutter_webview._resolveCallback('\(callbackId)', \(literal));"
                     )
                 }
             }
@@ -366,7 +366,7 @@ class WebviewPlusPlatformView: NSObject, FlutterPlatformView {
             )
             result(nil)
 
-        case "evaluateJavascript":
+        case "evaluateJavaScript":
             guard let args = call.arguments as? [String: Any], let code = args["code"] as? String else {
                 result(FlutterError(code: "INVALID_ARGUMENT", message: "code manquant", details: nil))
                 return
@@ -458,7 +458,7 @@ class WebviewPlusPlatformView: NSObject, FlutterPlatformView {
 
 // MARK: - WKNavigationDelegate
 
-extension WebviewPlusPlatformView: WKNavigationDelegate {
+extension FlutterWebviewPlatformView: WKNavigationDelegate {
     func webView(
         _ webView: WKWebView,
         decidePolicyFor navigationAction: WKNavigationAction,
@@ -518,7 +518,7 @@ extension WebviewPlusPlatformView: WKNavigationDelegate {
 
 // MARK: - WKUIDelegate (menu contextuel / long-press)
 
-extension WebviewPlusPlatformView: WKUIDelegate {
+extension FlutterWebviewPlatformView: WKUIDelegate {
     @available(iOS 13.0, *)
     func webView(
         _ webView: WKWebView,
@@ -554,7 +554,7 @@ extension WebviewPlusPlatformView: WKUIDelegate {
 
     /// Lit la sélection courante puis notifie Dart via `onContextMenuAction`
     /// (miroir de l'implémentation Android, voir
-    /// `WebviewPlusPlatformView.invokeCustomContextMenuAction` côté
+    /// `FlutterWebviewPlatformView.invokeCustomContextMenuAction` côté
     /// Kotlin).
     private func invokeCustomContextMenuAction(id: String) {
         webView.evaluateJavaScript("window.getSelection ? window.getSelection().toString() : '';") {
@@ -598,9 +598,9 @@ class ConfigurableWKWebView: WKWebView {
 /// on passe donc par un intermédiaire faible pour éviter une fuite mémoire
 /// (le PlatformView ne serait jamais désalloué sinon).
 private class LeakAvoidingScriptMessageHandler: NSObject, WKScriptMessageHandler {
-    private weak var owner: WebviewPlusPlatformView?
+    private weak var owner: FlutterWebviewPlatformView?
 
-    init(_ owner: WebviewPlusPlatformView) {
+    init(_ owner: FlutterWebviewPlatformView) {
         self.owner = owner
     }
 

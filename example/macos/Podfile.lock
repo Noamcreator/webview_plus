@@ -1,6 +1,6 @@
 PODS:
   - FlutterMacOS (1.0.0)
-  - webview_plus (0.5.0):
+  - webview_plus (0.6.0):
     - FlutterMacOS
 
 DEPENDENCIES:
@@ -15,7 +15,7 @@ EXTERNAL SOURCES:
 
 SPEC CHECKSUMS:
   FlutterMacOS: d0db08ddef1a9af05a5ec4b724367152bb0500b1
-  webview_plus: 861b5b3439f8a881edc2b75bafd94103affaaafa
+  webview_plus: 11a2867d23a4605a95acd8473a0ecdad40ba427d
 
 PODFILE CHECKSUM: 54d867c82ac51cbd61b565781b9fada492027009
 

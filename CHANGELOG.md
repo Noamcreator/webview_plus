@@ -1,3 +1,8 @@
+## 0.6.0
+
+* Bug in the evaluateJavaScript function on macOS and iOS causing a crash.
+* Remove the PrivacyInfo file in macOS for remove the warning.
+
 ## 0.5.0
 
 * Android: switch to `initSurfaceAndroidView` (Texture Layer Hybrid Composition) by default on API 23+, replacing the old choice between Virtual Display (janky scroll) and Hybrid Composition (janky Flutter animations around the webview). Native scroll and Flutter transitions/dialogs are now both smooth. Falls back automatically to the previous behavior on API < 23.

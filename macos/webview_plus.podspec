@@ -4,7 +4,7 @@
 #
 Pod::Spec.new do |s|
   s.name             = 'webview_plus'
-  s.version          = '0.5.0'
+  s.version          = '0.6.0'
   s.summary          = 'A cross-platform Flutter plugin that directly encapsulates native WebViews (Android, iOS/macOS, Windows, Linux andWeb) with no WebView dependencies.'
   s.description      = <<-DESC
   A cross-platform Flutter plugin that directly encapsulates native WebViews (Android, iOS/macOS, Windows, Linux andWeb) with no WebView dependencies.
@@ -15,12 +15,6 @@ Pod::Spec.new do |s|
 
   s.source           = { :path => '.' }
   s.source_files = 'webview_plus/Sources/webview_plus/**/*'
-
-  # If your plugin requires a privacy manifest, for example if it collects user
-  # data, update the PrivacyInfo.xcprivacy file to describe your plugin's
-  # privacy impact, and then uncomment this line. For more information,
-  # see https://developer.apple.com/documentation/bundleresources/privacy_manifest_files
-  # s.resource_bundles = {'webview_plus_privacy' => ['webview_plus/Sources/webview_plus/PrivacyInfo.xcprivacy']}
 
   s.dependency 'FlutterMacOS'
   s.frameworks = 'WebKit'
