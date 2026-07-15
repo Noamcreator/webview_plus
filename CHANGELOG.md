@@ -1,4 +1,4 @@
-## 0.7.0
+## 0.6.1
 
 * Fixed a critical Android WebView crash by allowing nullable arguments (String?) on JavaScript-to-Kotlin bridges to gracefully handle empty page lifecycles.
 
