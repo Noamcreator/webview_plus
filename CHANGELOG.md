@@ -1,3 +1,7 @@
+## 0.7.0
+
+* Fixed a critical Android WebView crash by allowing nullable arguments (String?) on JavaScript-to-Kotlin bridges to gracefully handle empty page lifecycles.
+
 ## 0.6.0
 
 * Bug in the evaluateJavaScript function on macOS and iOS causing a crash.

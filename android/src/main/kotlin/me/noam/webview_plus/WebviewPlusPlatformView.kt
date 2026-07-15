@@ -687,26 +687,23 @@ class WebviewPlusPlatformView(
 
 class WebviewPlusJsBridge(private val onMessage: (String) -> Unit) {
     @JavascriptInterface
-    fun postMessage(message: String) {
-        onMessage(message)
+    fun postMessage(message: String?) {
+        onMessage(message ?: "")
     }
 }
 
 class WebviewPlusDomContentLoadedBridge(private val onDOMContentLoaded: (String) -> Unit) {
     @JavascriptInterface
-    fun onDOMContentLoaded(url: String) {
-        onDOMContentLoaded(url)
+    fun onDOMContentLoaded(url: String?) { // Type rendu nullable (String?)
+        onDOMContentLoaded(url ?: "")
     }
 }
 
-/// Pont JS <-> Dart utilisé par `window.webview_plus.callHandler(...)`.
-/// `onCall` reçoit (nomDuHandler, argumentsEnJSON, idDeCallback) et est
-/// invoqué sur le thread JS ; il doit poster sur le thread principal.
 class WebviewPlusJsHandlerBridge(
     private val onCall: (handlerName: String, argsJson: String, callbackId: String) -> Unit
 ) {
     @JavascriptInterface
-    fun callHandler(handlerName: String, argsJson: String, callbackId: String) {
-        onCall(handlerName, argsJson, callbackId)
+    fun callHandler(handlerName: String?, argsJson: String?, callbackId: String?) {
+        onCall(handlerName ?: "", argsJson ?: "[]", callbackId ?: "")
     }
 }
