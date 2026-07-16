@@ -20,6 +20,7 @@ class WebviewPlusPlatformView: NSObject, FlutterPlatformView {
     private var disableContextMenu = false
     private var disableLongPressLinks = false
     private var selectionCssColor: String?
+    private var selectionTextCssColor: String?
     private var disabledDefaultContextMenuItems: Set<String> = []
 
     // -- Éléments personnalisés du menu contextuel (`ContextMenuItem`) ------
@@ -67,11 +68,24 @@ class WebviewPlusPlatformView: NSObject, FlutterPlatformView {
             LeakAvoidingScriptMessageHandler(self), name: "WebviewPlusJsHandler")
         userContentController.add(
             LeakAvoidingScriptMessageHandler(self), name: "WebviewPlusDomContentLoaded")
+
+        // ⚠️ `applySettings` doit être appelé *avant* de construire
+        // `bridgeScript()` : c'est lui qui calcule `selectionCssColor`, que
+        // le script de pont embarque dans son CSS `::selection`.
+        applySettings(settings)
+
         userContentController.addUserScript(WKUserScript(
             source: bridgeScript(),
             injectionTime: .atDocumentStart,
             forMainFrameOnly: false
         ))
+
+        // `initialUserScripts` : un `WKUserScript` par entrée, chacun avec
+        // son propre `injectionTime` / `forMainFrameOnly` (voir
+        // `UserScript.toMap()` côté Dart).
+        for userScript in Self.parseUserScripts(settings) {
+            userContentController.addUserScript(userScript)
+        }
 
         webView.navigationDelegate = self
         webView.uiDelegate = self
@@ -79,8 +93,6 @@ class WebviewPlusPlatformView: NSObject, FlutterPlatformView {
         channel.setMethodCallHandler { [weak self] call, result in
             self?.handle(call, result: result)
         }
-
-        applySettings(settings)
 
         if let items = creationParams?["contextMenuItems"] as? [[String: Any]] {
             customContextMenuItems = Self.parseContextMenuItems(items)
@@ -105,6 +117,25 @@ class WebviewPlusPlatformView: NSObject, FlutterPlatformView {
         return raw.compactMap { entry in
             guard let id = entry["id"] as? String, let name = entry["name"] as? String else { return nil }
             return (id: id, name: name)
+        }
+    }
+
+    /// Traduit `WebviewSettings.initialUserScripts` (voir
+    /// `UserScript.toMap()` côté Dart) en `WKUserScript`.
+    private static func parseUserScripts(_ settings: [String: Any?]?) -> [WKUserScript] {
+        guard let rawScripts = settings?["initialUserScripts"] as? [[String: Any?]] else {
+            return []
+        }
+        return rawScripts.compactMap { entry -> WKUserScript? in
+            guard let source = entry["source"] as? String else { return nil }
+            let injectionTime: WKUserScriptInjectionTime =
+                (entry["injectionTime"] as? String) == "atDocumentEnd" ? .atDocumentEnd : .atDocumentStart
+            let forMainFrameOnly = (entry["forMainFrameOnly"] as? Bool) ?? true
+            return WKUserScript(
+                source: source,
+                injectionTime: injectionTime,
+                forMainFrameOnly: forMainFrameOnly
+            )
         }
     }
 
@@ -150,7 +181,7 @@ class WebviewPlusPlatformView: NSObject, FlutterPlatformView {
         }
         webView.disabledActions = disabledDefaultContextMenuItems
 
-        if let colorValue = settings?["selectionHandleColor"] as? Int {
+        if let colorValue = settings?["selectionTextColor"] as? Int {
             selectionCssColor = argbToCssRgba(colorValue)
             // `tintColor` pilote la couleur du curseur et des poignées de
             // sélection natives sur WKWebView (contrairement à Android, où
@@ -162,6 +193,10 @@ class WebviewPlusPlatformView: NSObject, FlutterPlatformView {
             let g = CGFloat((colorValue >> 8) & 0xFF) / 255.0
             let b = CGFloat(colorValue & 0xFF) / 255.0
             webView.tintColor = UIColor(red: r, green: g, blue: b, alpha: a == 0 ? 1 : a)
+        }
+
+        if let textColorValue = settings?["selectionHandleColor"] as? Int {
+            selectionTextCssColor = argbToCssRgba(textColorValue)
         }
     }
 
@@ -181,10 +216,12 @@ class WebviewPlusPlatformView: NSObject, FlutterPlatformView {
     /// (pont vers `onMessageReceived`), plus le CSS de sélection éventuel.
     private func bridgeScript() -> String {
         let cssBlock: String
-        if let color = selectionCssColor {
+        if selectionCssColor != nil || selectionTextCssColor != nil {
+            let backgroundRule = selectionCssColor.map { "background:\($0);" } ?? ""
+            let colorRule = selectionTextCssColor.map { "color:\($0);" } ?? ""
             cssBlock = "document.addEventListener('DOMContentLoaded',function(){" +
                 "var st=document.createElement('style');" +
-                "st.innerHTML='::selection{background:\(color);}';" +
+                "st.innerHTML='::selection{\(backgroundRule)\(colorRule)}';" +
                 "(document.head||document.documentElement).appendChild(st);});"
         } else {
             cssBlock = ""

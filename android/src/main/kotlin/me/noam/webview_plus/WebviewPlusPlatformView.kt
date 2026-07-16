@@ -7,6 +7,7 @@ import android.graphics.Color
 import android.os.Handler
 import android.os.Looper
 import android.view.ActionMode
+import android.view.ContextThemeWrapper
 import android.view.Menu
 import android.view.View
 import android.webkit.JavascriptInterface
@@ -15,6 +16,9 @@ import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import androidx.core.graphics.Insets
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
@@ -54,7 +58,18 @@ class WebviewPlusPlatformView(
     // "vierges" (jamais `loadUrl` appelé dessus), donc aucun risque de
     // rater un évènement onLoadStart/onLoadStop côté Dart en les réutilisant
     // ici comme si elles venaient d'être construites normalement.
-    private val webView: WebView = preWarmedWebView ?: WebView(context)
+    //
+    // `WebviewPlusSelectionTheme` (voir res/values/styles.xml) surcharge
+    // uniquement `android:colorControlActivated`, attribut que Chromium
+    // résout depuis le thème du Context passé au constructeur pour teinter
+    // les poignées de sélection natives. Sa valeur par défaut est fournie
+    // par `@color/webview_plus_selection_handle_color` (res/values/colors.xml),
+    // surchargeable par l'application hôte (mécanisme standard de
+    // surcharge de ressources d'une librairie Android). ⚠️ Ne s'applique
+    // pas aux instances pré-chauffées (`preWarmedWebView`), leur Context
+    // étant déjà figé au moment du `warmUp`.
+    private val webView: WebView = preWarmedWebView
+        ?: WebView(ContextThemeWrapper(context, R.style.WebviewPlusSelectionTheme))
     private val channel = MethodChannel(messenger, "webview_plus_$viewId")
     private val mainHandler = Handler(Looper.getMainLooper())
 
@@ -63,6 +78,11 @@ class WebviewPlusPlatformView(
     private var disableLongPressLinks = false
     private var selectionCssColor: String? = null
     private var disabledDefaultContextMenuItems: Set<String> = emptySet()
+
+    // Scripts `initialUserScripts` (voir webview_plus_user_script.dart),
+    // partitionnés par moment d'injection.
+    private var userScriptsAtStart: List<String> = emptyList()
+    private var userScriptsAtEnd: List<String> = emptyList()
 
     // -- Éléments personnalisés du menu de sélection (`ContextMenuItem`) ---
     // Liste de (id, name) ; seule la correspondance id -> callback Dart est
@@ -145,6 +165,15 @@ class WebviewPlusPlatformView(
                 }
             },
             "WebviewPlusDomContentLoaded"
+        )
+
+        webView.addJavascriptInterface(
+            WebviewPlusFontsLoadedBridge { familiesJson ->
+                mainHandler.post {
+                    channel.invokeMethod("onFontsIsLoaded", familiesJson)
+                }
+            },
+            "WebviewPlusFontsLoaded"
         )
 
         // Pont utilisé par `window.webview_plus.callHandler(...)` côté JS
@@ -287,12 +316,49 @@ class WebviewPlusPlatformView(
         val disabledItems = settings?.get("disabledDefaultContextMenuItems") as? List<String>
         disabledDefaultContextMenuItems = disabledItems?.toSet() ?: emptySet()
 
-        val colorValue = when (val raw = settings?.get("selectionHandleColor")) {
+        val colorValue = when (val raw = settings?.get("selectionTextColor")) {
             is Int -> raw.toLong()
             is Long -> raw
             else -> null
         }
         selectionCssColor = colorValue?.let { argbToCssRgba(it.toInt()) }
+
+        @Suppress("UNCHECKED_CAST")
+        val rawUserScripts = settings?.get("initialUserScripts") as? List<Map<String, Any?>>
+        val start = mutableListOf<String>()
+        val end = mutableListOf<String>()
+        rawUserScripts?.forEach { entry ->
+            val source = entry["source"] as? String ?: return@forEach
+            when (entry["injectionTime"] as? String) {
+                "atDocumentEnd" -> end.add(source)
+                else -> start.add(source)
+            }
+        }
+        userScriptsAtStart = start
+        userScriptsAtEnd = end
+
+        val disableKeyboardResize = (settings?.get("disableKeyboardResize") as? Boolean) ?: false
+        applyKeyboardResizeSetting(disableKeyboardResize)
+    }
+
+    /// Empêche la WebView de réagir au changement de hauteur de l'inset IME
+    /// (clavier virtuel) lorsque [disable] vaut `true`, en le mettant
+    /// systématiquement à zéro avant que la vue (et donc le moteur Chromium
+    /// sous-jacent, qui redimensionne son viewport interne d'après cet
+    /// inset) ne le voie. Approche 100% native basée sur
+    /// `WindowInsetsCompat`, sans aucun script s'appuyant sur
+    /// `window.innerHeight`.
+    private fun applyKeyboardResizeSetting(disable: Boolean) {
+        if (!disable) {
+            ViewCompat.setOnApplyWindowInsetsListener(webView, null)
+            return
+        }
+        ViewCompat.setOnApplyWindowInsetsListener(webView) { view, insets ->
+            val stripped = WindowInsetsCompat.Builder(insets)
+                .setInsets(WindowInsetsCompat.Type.ime(), Insets.NONE)
+                .build()
+            ViewCompat.onApplyWindowInsets(view, stripped)
+        }
     }
 
     private fun argbToCssRgba(argb: Int): String {
@@ -402,12 +468,37 @@ class WebviewPlusPlatformView(
             """.trimIndent()
         } ?: ""
 
+        // `initialUserScripts` en atDocumentStart : exécutés immédiatement,
+        // avant même le reste de ce script de pont.
+        val startUserScripts = userScriptsAtStart.joinToString("\n") { "(function(){ $it })();" }
+
+        // `initialUserScripts` en atDocumentEnd : exécutés juste après
+        // DOMContentLoaded, avant la notification `onDOMContentLoaded` de
+        // Dart.
+        val endUserScripts = userScriptsAtEnd.joinToString("\n") { "(function(){ $it })();" }
+
+        val fontsReadyScript = """
+            if (window.document.fonts && window.document.fonts.ready) {
+              window.document.fonts.ready.then(function(fontFaceSet) {
+                var families = [];
+                fontFaceSet.forEach(function(f) { families.push(f.family); });
+                if (window.WebviewPlusFontsLoaded) {
+                  window.WebviewPlusFontsLoaded.onFontsIsLoaded(JSON.stringify(families));
+                }
+              });
+            }
+            """.trimIndent()
+
         val js = """
             (function() {
+              $startUserScripts
+
               if (window.webview_plus) return;
 
               function __fwNotifyDomContentLoaded() {
                 $cssInjection
+                $endUserScripts
+                $fontsReadyScript
                 if (window.WebviewPlusDomContentLoaded) {
                   window.WebviewPlusDomContentLoaded.onDOMContentLoaded(window.location.href);
                 }
@@ -712,6 +803,17 @@ class WebviewPlusDomContentLoadedBridge(private val callback: (String) -> Unit) 
     @JavascriptInterface
     fun onDOMContentLoaded(url: String) {
         callback(url)
+    }
+}
+
+/// Pont JS -> Dart utilisé par le script injecté dans `injectBridgeScript`
+/// pour notifier la résolution de `document.fonts.ready`. [familiesJson]
+/// est un tableau JSON de noms de familles de police (ex : `["Roboto"]`),
+/// décodé côté Dart dans `WebviewPlusController._onMethodCall`.
+class WebviewPlusFontsLoadedBridge(private val callback: (String) -> Unit) {
+    @JavascriptInterface
+    fun onFontsIsLoaded(familiesJson: String) {
+        callback(familiesJson)
     }
 }
 

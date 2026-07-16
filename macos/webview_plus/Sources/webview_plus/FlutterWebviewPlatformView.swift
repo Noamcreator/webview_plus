@@ -26,6 +26,7 @@ class WebviewPlusPlatformView: WKWebView {
     private var disableContextMenu = false
     private var disableLongPressLinks = false
     private var selectionCssColor: String?
+    private var selectionTextCssColor: String?
 
     // Mis à jour en continu par le script injecté (mouseover/mouseout) afin
     // de savoir, au moment du clic droit, si le curseur survole un lien —
@@ -81,8 +82,19 @@ class WebviewPlusPlatformView: WKWebView {
             LeakAvoidingScriptMessageHandler(self), name: "WebviewPlusLinkHover")
         userContentController.add(
             LeakAvoidingScriptMessageHandler(self), name: "WebviewPlusDomContentLoaded")
+        userContentController.add(
+            LeakAvoidingScriptMessageHandler(self), name: "WebviewPlusFontsLoaded")
 
         applySettings(settings)
+
+        // `initialUserScripts` : injectés en plus du script de pont
+        // ci-dessous, chacun avec son propre `injectionTime`. Un
+        // `WKUserScript` par entrée (plutôt que de les concaténer dans
+        // `bridgeScript()`) afin de respecter individuellement le réglage
+        // `forMainFrameOnly` de chacun.
+        for userScript in parseUserScripts(settings) {
+            userContentController.addUserScript(userScript)
+        }
 
         // Le script de pont dépend de `selectionCssColor`, calculé par
         // `applySettings` : on l'ajoute donc après coup.
@@ -162,6 +174,29 @@ class WebviewPlusPlatformView: WKWebView {
         if let colorValue = settings?["selectionHandleColor"] as? Int {
             selectionCssColor = argbToCssRgba(colorValue)
         }
+
+        if let textColorValue = settings?["selectionHandleColor"] as? Int {
+            selectionTextCssColor = argbToCssRgba(textColorValue)
+        }
+    }
+
+    /// Traduit `WebviewSettings.initialUserScripts` (liste de `Map` côté
+    /// Dart, voir `UserScript.toMap()`) en `WKUserScript`.
+    private func parseUserScripts(_ settings: [String: Any?]?) -> [WKUserScript] {
+        guard let rawScripts = settings?["initialUserScripts"] as? [[String: Any?]] else {
+            return []
+        }
+        return rawScripts.compactMap { entry -> WKUserScript? in
+            guard let source = entry["source"] as? String else { return nil }
+            let injectionTime: WKUserScriptInjectionTime =
+                (entry["injectionTime"] as? String) == "atDocumentEnd" ? .atDocumentEnd : .atDocumentStart
+            let forMainFrameOnly = (entry["forMainFrameOnly"] as? Bool) ?? true
+            return WKUserScript(
+                source: source,
+                injectionTime: injectionTime,
+                forMainFrameOnly: forMainFrameOnly
+            )
+        }
     }
 
     private func argbToCssRgba(_ argb: Int) -> String {
@@ -200,10 +235,12 @@ class WebviewPlusPlatformView: WKWebView {
     /// `disableLongPressContextMenuOnLinks`.
     private func bridgeScript() -> String {
         let cssBlock: String
-        if let color = selectionCssColor {
+        if selectionCssColor != nil || selectionTextCssColor != nil {
+            let backgroundRule = selectionCssColor.map { "background:\($0);" } ?? ""
+            let colorRule = selectionTextCssColor.map { "color:\($0);" } ?? ""
             cssBlock = "document.addEventListener('DOMContentLoaded',function(){" +
                 "var st=document.createElement('style');" +
-                "st.innerHTML='::selection{background:\(color);}';" +
+                "st.innerHTML='::selection{\(backgroundRule)\(colorRule)}';" +
                 "(document.head||document.documentElement).appendChild(st);});"
         } else {
             cssBlock = ""
@@ -227,6 +264,14 @@ class WebviewPlusPlatformView: WKWebView {
             document.addEventListener('DOMContentLoaded', __fwNotifyDomContentLoaded);
           } else {
             __fwNotifyDomContentLoaded();
+          }
+
+          if (window.document.fonts && window.document.fonts.ready) {
+            window.document.fonts.ready.then(function(fontFaceSet) {
+              var families = [];
+              fontFaceSet.forEach(function(f) { families.push(f.family); });
+              window.webkit.messageHandlers.WebviewPlusFontsLoaded.postMessage(JSON.stringify(families));
+            });
           }
 
           var __fwCbId = 0;
@@ -281,6 +326,10 @@ class WebviewPlusPlatformView: WKWebView {
         case "WebviewPlusDomContentLoaded":
             if let url = message.body as? String {
                 channel.invokeMethod("onDOMContentLoaded", arguments: url)
+            }
+        case "WebviewPlusFontsLoaded":
+            if let familiesJson = message.body as? String {
+                channel.invokeMethod("onFontsIsLoaded", arguments: familiesJson)
             }
         case "WebviewPlusJsHandler":
             guard let body = message.body as? [String: Any],

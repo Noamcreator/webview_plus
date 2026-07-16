@@ -173,6 +173,16 @@ typedef JavaScriptHandlerCallback = FutureOr<dynamic> Function(
 typedef WebviewCreatedCallback = void Function(
     WebviewPlusController controller);
 
+/// Callback appelé lorsque toutes les polices de la page ont fini de
+/// charger (`document.fonts.ready`, voir la spécification CSS Font
+/// Loading). [loadedFontFamilies] liste les familles de police effectivement
+/// chargées à ce moment (peut être vide si la page n'utilise que des
+/// polices système).
+typedef WebviewFontsLoadedCallback = void Function(
+  WebviewPlatformController controller,
+  List<String> loadedFontFamilies,
+);
+
 /// Contrôleur permettant de piloter une instance de Webview native
 /// (Android, iOS, macOS, Windows, Linux) depuis Dart.
 ///
@@ -196,6 +206,7 @@ class WebviewPlusController implements WebviewPlatformController {
   WebviewControllerCallback? _onWindowFocus;
   WebviewControllerCallback? _onWindowBlur;
   WebviewCursorCallback? _onCursorChanged;
+  WebviewFontsLoadedCallback? _onFontsIsLoaded;
 
   final Map<String, JavaScriptHandlerCallback> _javaScriptHandlers =
       <String, JavaScriptHandlerCallback>{};
@@ -216,6 +227,7 @@ class WebviewPlusController implements WebviewPlatformController {
     WebviewControllerCallback? onWindowFocus,
     WebviewControllerCallback? onWindowBlur,
     WebviewCursorCallback? onCursorChanged,
+    WebviewFontsLoadedCallback? onFontsIsLoaded,
     List<ContextMenuItem> contextMenuItems = const <ContextMenuItem>[],
   }) {
     final channel = MethodChannel('webview_plus_$viewId');
@@ -228,7 +240,8 @@ class WebviewPlusController implements WebviewPlatformController {
       .._onReceivedError = onReceivedError
       .._onWindowFocus = onWindowFocus
       .._onWindowBlur = onWindowBlur
-      .._onCursorChanged = onCursorChanged;
+      .._onCursorChanged = onCursorChanged
+      .._onFontsIsLoaded = onFontsIsLoaded;
     _controller._registerContextMenuActionsLocally(contextMenuItems);
     channel.setMethodCallHandler(_controller._onMethodCall);
     return _controller;
@@ -301,6 +314,19 @@ class WebviewPlusController implements WebviewPlatformController {
       case 'onCursorChanged':
         final String cursorKind = call.arguments as String;
         _onCursorChanged?.call(_controller, cursorKind);
+        return null;
+
+      case 'onFontsIsLoaded':
+        final String familiesJson = call.arguments as String? ?? '[]';
+        List<String> families;
+        try {
+          families = (jsonDecode(familiesJson) as List<dynamic>)
+              .map((e) => e.toString())
+              .toList();
+        } catch (_) {
+          families = <String>[];
+        }
+        _onFontsIsLoaded?.call(_controller, families);
         return null;
 
       case 'onContextMenuAction':

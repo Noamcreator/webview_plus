@@ -1,6 +1,7 @@
 import 'package:flutter/painting.dart' show Color;
 
 import 'webview_plus_context_menu.dart';
+import 'webview_plus_user_script.dart';
 
 enum AndroidPlatformViewType {
   /// Texture Layer Hybrid Composition (recommandé, API 23+).
@@ -36,6 +37,7 @@ class WebviewSettings {
     this.isInspectable = false,
     this.disableContextMenu = false,
     this.disableLongPressContextMenuOnLinks = false,
+    this.selectionTextColor,
     this.selectionHandleColor,
     this.androidPlatformViewType = AndroidPlatformViewType.surfaceComposition,
     this.allowsBackForwardNavigationGestures = false,
@@ -43,6 +45,8 @@ class WebviewSettings {
     this.disabledDefaultContextMenuItems = const <DefaultContextMenuItem>{},
     this.disableLinkHoverPreview = true,
     this.disablePrinting = false,
+    this.initialUserScripts = const <UserScript>[],
+    this.disableKeyboardResize = false,
   });
 
   /// Active/désactive l'exécution JavaScript (toutes plateformes).
@@ -98,12 +102,31 @@ class WebviewSettings {
   /// Couleur de surbrillance du texte sélectionné (et, si le système le
   /// permet, des poignées de sélection).
   ///
-  /// ⚠️ Réglage "best effort" côté Android : il n'existe pas d'API
-  /// publique pour recolorer les poignées natives elles-mêmes. Le plugin
-  /// applique un `::selection { background-color: ... }` CSS, ce qui
-  /// change fidèlement la couleur de surbrillance du texte, mais la
-  /// forme/couleur exacte de la "goutte" tactile reste pilotée par le
-  /// thème Android de l'application hôte.
+  /// Sur Android, ce réglage a deux effets :
+  /// 1. Un `::selection { background-color: ... }` CSS, appliqué à chaque
+  ///    page chargée, qui recolore fidèlement la surbrillance du texte
+  ///    sélectionné.
+  /// 2. Une tentative de recoloration native de la "goutte" tactile de
+  ///    sélection elle-même : la Webview est créée dans un contexte dont
+  ///    l'attribut de thème `android:colorControlActivated` est surchargé
+  ///    dynamiquement avec cette couleur (c'est cet attribut que Chromium
+  ///    utilise en interne pour teinter les poignées de sélection).
+  ///
+  /// ⚠️ Le point 2 est du "best effort" : Android ne permet pas de
+  /// surcharger un attribut de thème avec une valeur arbitraire fournie à
+  /// l'exécution (seules des ressources compilées peuvent l'être). Le
+  /// plugin embarque donc une ressource couleur par défaut,
+  /// `@color/webview_plus_selection_handle_color` (voir
+  /// `android/src/main/res/values/colors.xml`), que la Webview utilise
+  /// pour son thème de poignées ; **pour une valeur figée à la compilation,
+  /// redéfinissez cette ressource dans les `res/values` de votre propre
+  /// application** (mécanisme standard de surcharge de ressources d'une
+  /// librairie Android). La valeur dynamique passée ici via [Color] pilote
+  /// fiablement le CSS (point 1) dans tous les cas ; elle ne met à jour la
+  /// teinte native des poignées (point 2) que si elle correspond à la
+  /// ressource déclarée à la compilation.
+  final Color? selectionTextColor;
+  
   final Color? selectionHandleColor;
 
   /// Type de composition et rendu sur Android.
@@ -137,6 +160,21 @@ class WebviewSettings {
   /// défaut (impression autorisée).
   final bool disablePrinting;
 
+  /// Scripts JavaScript injectés automatiquement dans chaque page chargée
+  /// (voir [UserScript]). **Android, iOS, macOS.**
+  final List<UserScript> initialUserScripts;
+
+  /// Empêche la Webview de se redimensionner (rétrécir) lorsque le
+  /// clavier virtuel apparaît. **Android et iOS uniquement.**
+  ///
+  /// Réglage purement natif, basé sur les insets système (IME) : il
+  /// n'injecte aucun script s'appuyant sur `window.innerHeight` (ce genre
+  /// de hack JS ne fait que masquer visuellement le symptôme après coup et
+  /// provoque un flash de redimensionnement). Faux par défaut : la
+  /// Webview suit le comportement standard de la plateforme (elle se
+  /// redimensionne pour laisser la place au clavier).
+  final bool disableKeyboardResize;
+
   Map<String, dynamic> toMap() => <String, dynamic>{
         'javaScriptEnabled': javaScriptEnabled,
         'domStorageEnabled': domStorageEnabled,
@@ -151,17 +189,16 @@ class WebviewSettings {
         'userAgent': userAgent,
         'isInspectable': isInspectable,
         'disableContextMenu': disableContextMenu,
-        'disableLongPressContextMenuOnLinks':
-            disableLongPressContextMenuOnLinks,
-        'selectionHandleColor': selectionHandleColor?.toARGB32(),
+        'disableLongPressContextMenuOnLinks': disableLongPressContextMenuOnLinks,
+        'selectionTextColor': selectionTextColor?.toARGB32(),
+        'selectionHandleColor ': selectionHandleColor ?.toARGB32(),
         'androidPlatformViewType': androidPlatformViewType.name,
-        'allowsBackForwardNavigationGestures':
-            allowsBackForwardNavigationGestures,
+        'allowsBackForwardNavigationGestures': allowsBackForwardNavigationGestures,
         'allowsLinkPreview': allowsLinkPreview,
-        'disabledDefaultContextMenuItems': disabledDefaultContextMenuItems
-            .map((e) => e.name)
-            .toList(),
+        'disabledDefaultContextMenuItems': disabledDefaultContextMenuItems.map((e) => e.name).toList(),
         'disableLinkHoverPreview': disableLinkHoverPreview,
         'disablePrinting': disablePrinting,
+        'initialUserScripts': initialUserScripts.map((e) => e.toMap()).toList(),
+        'disableKeyboardResize': disableKeyboardResize,
       };
 }

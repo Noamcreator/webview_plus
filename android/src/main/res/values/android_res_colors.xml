@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      Couleur par défaut des poignées de sélection natives (via
+      android:colorControlActivated, voir styles.xml). Utilisée uniquement
+      quand `WebviewSettings.selectionTextColor` n'est pas fourni côté
+      Dart, ou comme teinte de secours tant qu'une valeur dynamique ne peut
+      pas être compilée en ressource.
+
+      Pour une valeur figée propre à votre app, redéfinissez cette même
+      ressource (même nom, même type) dans le res/values de votre module
+      android/app : c'est le mécanisme standard Android de surcharge de
+      ressources d'une librairie par l'application qui la consomme.
+    -->
+    <color name="webview_plus_selection_handle_color">#FF2196F3</color>
+</resources>

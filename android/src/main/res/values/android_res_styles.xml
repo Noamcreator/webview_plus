@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+      Appliqué via ContextThemeWrapper au Context de chaque WebView (voir
+      WebviewPlusPlatformView.kt). Volontairement sans `parent` : seul
+      `android:colorControlActivated` est surchargé, tous les autres
+      attributs de thème continuent de venir du thème de l'Activité hôte.
+
+      C'est cet attribut que Chromium résout en interne pour teinter les
+      poignées de sélection de texte natives ("gouttes" tactiles) d'une
+      WebView — il n'existe pas d'API publique dédiée pour les recolorer
+      autrement.
+    -->
+    <style name="WebviewPlusSelectionTheme">
+        <item name="android:colorControlActivated">@color/webview_plus_selection_handle_color</item>
+    </style>
+</resources>

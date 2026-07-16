@@ -30,6 +30,8 @@ Unlike other webview implementations that introduce complex virtualization layer
 - **Advanced Asset & File System Access:** Load URLs, bundle assets, or absolute file paths from the local device storage.
 - **Android Rendering Performance:** Defaults to Texture Layer Hybrid Composition (`initSurfaceAndroidView`) on API 23+, giving native-speed scrolling without the janky Flutter animations/transitions that plague classic Hybrid Composition. Automatically falls back to legacy modes on older devices.
 - **Android Preloading API:** `WebviewPlusPreloader` lets you warm up the WebView engine and/or prefetch a URL into the shared HTTP cache *before* the user opens a webview screen, for a near-instant first paint. See [Preloading & Faster First Load](#-preloading--faster-first-load-android) below.
+- **Automatic Script Injection:** Declare a list of `UserScript`s in `initialSettings.initialUserScripts` to have them injected automatically into every page the webview loads (Android/iOS/macOS).
+- **Keyboard-Aware Layout Control:** `disableKeyboardResize` stops the webview from shrinking when the on-screen keyboard appears, using native IME insets rather than a JS `window.innerHeight` workaround (Android/iOS).
 
 ---
 
@@ -246,12 +248,18 @@ const WebviewSettings(
 | `isInspectable` | `false` | All | Opens hooks for Safari Web Inspector or Chrome DevTools remote attachment. |
 | `disableContextMenu` | `false` | Android/iOS | Disables long-press menus and touch selection interactions completely. |
 | `disableLongPressContextMenuOnLinks`| `false` | Android/iOS | Prevents special links preview/copy contextual windows specifically. |
-| `selectionHandleColor` | `AndroidPlatformViewType.surfaceComposition` | Android | Choose Android rendering mode: surfaceComposition (Texture Layer Hybrid Composition), hybridComposition (Classic Hybrid Composition), or virtualDisplay. On API < 23, surfaceComposition automatically falls back to hybridComposition (initExpensiveAndroidView) to ensure proper rendering. |
-| `androidPlatformViewType` | `true` | Android | **Fallback only, API < 23.** On API 23+, the plugin always uses Texture Layer Hybrid Composition (best of both worlds) regardless of this flag. Below API 23, `true` uses classic Hybrid Composition (correct native behavior, but can be janky during Flutter animations), `false` uses Virtual Display (smooth Flutter animations, but slightly less fluid native scroll). |
+| `selectionTextColor` | `null` | All (native handle tint: Android only) | Colors selected-text highlighting via an injected `::selection` CSS rule on every loaded page. On Android, also attempts a best-effort native tint of the selection handles themselves — see the caveat below. |
+| `selectionHandleColor` | `null` | Android | Companion color for the native selection "handle" drop. Best-effort only: Android doesn't allow overriding a theme attribute with an arbitrary runtime value, so the plugin ships a compiled color resource (`@color/webview_plus_selection_handle_color`) that actually drives the handle tint — override that resource in your own app's `res/values` for a build-time-fixed value. |
+| `androidPlatformViewType` | `AndroidPlatformViewType.surfaceComposition` | Android | Choose Android rendering mode: `surfaceComposition` (Texture Layer Hybrid Composition, recommended, API 23+), `hybridComposition` (classic Hybrid Composition, robust but can be janky during Flutter animations), or `virtualDisplay` (TextureView, less fluid scroll but broadest device compatibility). On API < 23, `surfaceComposition` automatically falls back to `hybridComposition` to ensure proper rendering. |
 | `allowsBackForwardNavigationGestures`| `false` | iOS | Enables edge swipe gesture history forward/backward navigations. |
 | `allowsLinkPreview` | `false` | iOS | Enables 3D Touch/Long Press link "Peek and Pop" preview panels. |
-| `disableLinkHoverPreview` | `true` | Desktop | Hides status bar hover URL strings appearing at the bottom of the pane (Windows). |
-| `disablePrinting` | `false` | Windows | Blocks implicit printing calls via keyboard hotkeys (`Ctrl+P`) or `window.print()`. |
+| `disabledDefaultContextMenuItems` | `{}` | Android/iOS | Individually disables default context menu items (copy, cut, paste, select all…). No effect if `disableContextMenu` is already `true`; custom items added via `contextMenuItems` are never affected. |
+| `disableLinkHoverPreview` | `true` | Desktop | Hides status bar hover URL strings appearing at the bottom of the pane (mainly Windows/Webview2). |
+| `disablePrinting` | `false` | All | Blocks printing triggered via the `Ctrl+P` shortcut and, where the platform supports it, `window.print()`. |
+| `initialUserScripts` | `[]` | Android/iOS/macOS | JavaScript `UserScript`s automatically injected into every page that loads. |
+| `disableKeyboardResize` | `false` | Android/iOS | Prevents the webview from resizing when the on-screen keyboard appears. Purely native, based on system IME insets — no `window.innerHeight` JS hacks involved. |
+
+> **Note on `selectionHandleColor` (Android):** the CSS-based highlight (`selectionTextColor`) always applies reliably. The native handle tint is best-effort only — Android doesn't let a theme attribute be overridden with an arbitrary runtime value, only with resources compiled into the app. The dynamic color you pass drives the native handle tint only insofar as it matches the compiled `@color/webview_plus_selection_handle_color` resource shipped by the plugin.
 
 ---
 

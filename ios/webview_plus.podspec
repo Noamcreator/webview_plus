@@ -4,7 +4,7 @@
 #
 Pod::Spec.new do |s|
   s.name             = 'webview_plus'
-  s.version          = '0.6.3'
+  s.version          = '7.0.0'
   s.summary          = 'A cross-platform Flutter plugin that directly encapsulates native WebViews (Android, iOS/macOS, Windows, Linux andWeb) with no WebView dependencies.'
   s.description      = <<-DESC
   A cross-platform Flutter plugin that directly encapsulates native WebViews (Android, iOS/macOS, Windows, Linux andWeb) with no WebView dependencies.

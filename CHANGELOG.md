@@ -1,3 +1,12 @@
+## 0.7.0
+
+* Add `selectionTextColor` setting on Android and iOS.
+* Add `selectionHandleColor` setting on Android.
+* Add `disableKeyboardResize` setting on Android and iOS to prevent WebView from resizing when the virtual keyboard appears.
+* Add `initialUserScripts` setting to inject JavaScript code into pages on Android, iOS, and macOS.
+* Add `disabledDefaultContextMenuItems` setting to individually disable default native context menu items on Android and iOS.
+
+
 ## 0.6.3
 
 * Add `onDOMContentLoaded` callback on IOS, MacOS and Linux.

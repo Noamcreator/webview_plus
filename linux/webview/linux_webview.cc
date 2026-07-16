@@ -328,6 +328,22 @@ static gboolean print_requested_cb(WebKitWebview *web_view,
   return webview->disable_printing ? TRUE : FALSE;
 }
 
+// Convertit une couleur ARGB (`Color.toARGB32()` côté Dart) en littéral CSS
+// `rgba(...)`, alloué via `g_strdup_printf` (à libérer par l'appelant).
+// Renvoie `nullptr` si `argb` vaut 0 (valeur par défaut de
+// `map_lookup_int` quand la clé est absente : 0 = transparent noir, donc
+// sans effet visuel, autant ne pas injecter de CSS pour rien).
+gchar *argb_to_css_rgba(gint64 argb) {
+  if (argb == 0) {
+    return nullptr;
+  }
+  const gint a = (argb >> 24) & 0xFF;
+  const gint r = (argb >> 16) & 0xFF;
+  const gint g = (argb >> 8) & 0xFF;
+  const gint b = argb & 0xFF;
+  return g_strdup_printf("rgba(%d,%d,%d,%.3f)", r, g, b, a / 255.0);
+}
+
 }  // namespace
 
 
@@ -368,18 +384,27 @@ void begin_navigation(LinuxWebview *webview, const gchar *uri) {
 
 // -- Pont JS injecté au chargement de chaque page ------------------------
 
-void apply_bridge_script(LinuxWebview *webview, const gchar *selection_css) {
+void apply_bridge_script(LinuxWebview *webview, const gchar *selection_css,
+                         const gchar *selection_text_css) {
   webkit_user_content_manager_remove_all_scripts(webview->content_manager);
 
+  g_autofree gchar *background_rule =
+      selection_css != nullptr ? g_strdup_printf("background:%s;", selection_css)
+                               : g_strdup("");
+  g_autofree gchar *color_rule =
+      selection_text_css != nullptr
+          ? g_strdup_printf("color:%s;", selection_text_css)
+          : g_strdup("");
+
   g_autofree gchar *css_block =
-      selection_css != nullptr
+      (selection_css != nullptr || selection_text_css != nullptr)
           ? g_strdup_printf(
                 "document.addEventListener('DOMContentLoaded',function(){"
                 "var st=document.createElement('style');"
-                "st.innerHTML='::selection{background:%s;}';"
+                "st.innerHTML='::selection{%s%s}';"
                 "(document.head||document.documentElement).appendChild(st);"
                 "});",
-                selection_css)
+                background_rule, color_rule)
           : g_strdup("");
 
   g_autofree gchar *script = g_strdup_printf(
@@ -429,6 +454,54 @@ void apply_bridge_script(LinuxWebview *webview, const gchar *selection_css) {
       WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_START, nullptr, nullptr);
   webkit_user_content_manager_add_script(webview->content_manager, user_script);
   webkit_user_script_unref(user_script);
+}
+
+// `initialUserScripts` (voir `UserScript.toMap()` côté Dart) : un
+// `WebKitUserScript` par entrée, WebKitGTK exposant nativement les deux
+// axes du modèle Dart (`WebKitUserScriptInjectionTime` pour
+// `injectionTime`, `WebKitUserContentInjectedFrames` pour
+// `forMainFrameOnly`) — contrairement à Windows/Android, aucune
+// concaténation manuelle dans le script de pont n'est nécessaire ici.
+//
+// ⚠️ Doit être appelé *après* `apply_bridge_script`, celui-ci commençant
+// par `webkit_user_content_manager_remove_all_scripts` (il effacerait
+// sinon ces scripts au passage).
+void apply_user_scripts(LinuxWebview *webview, FlValue *settings) {
+  FlValue *raw_scripts = map_lookup(settings, "initialUserScripts");
+  if (raw_scripts == nullptr ||
+      fl_value_get_type(raw_scripts) != FL_VALUE_TYPE_LIST) {
+    return;
+  }
+
+  for (size_t i = 0; i < fl_value_get_length(raw_scripts); i++) {
+    FlValue *entry = fl_value_get_list_value(raw_scripts, i);
+    if (entry == nullptr || fl_value_get_type(entry) != FL_VALUE_TYPE_MAP) {
+      continue;
+    }
+
+    const gchar *source = map_lookup_string(entry, "source");
+    if (source == nullptr) {
+      continue;
+    }
+
+    const gchar *injection_time_str = map_lookup_string(entry, "injectionTime");
+    const WebKitUserScriptInjectionTime injection_time =
+        (injection_time_str != nullptr &&
+         strcmp(injection_time_str, "atDocumentEnd") == 0)
+            ? WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_END
+            : WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_START;
+
+    const gboolean for_main_frame_only =
+        map_lookup_bool(entry, "forMainFrameOnly", TRUE);
+    const WebKitUserContentInjectedFrames injected_frames =
+        for_main_frame_only ? WEBKIT_USER_CONTENT_INJECT_TOP_FRAME
+                            : WEBKIT_USER_CONTENT_INJECT_ALL_FRAMES;
+
+    WebKitUserScript *user_script = webkit_user_script_new(
+        source, injected_frames, injection_time, nullptr, nullptr);
+    webkit_user_content_manager_add_script(webview->content_manager, user_script);
+    webkit_user_script_unref(user_script);
+  }
 }
 
 // -- Cycle de vie -----------------------------------------------------
@@ -511,6 +584,7 @@ LinuxWebview *create_linux_webview(WebviewPlusPlugin *self, gint64 view_id,
   }
 
   apply_bridge_script(webview, webview->selection_css_color);
+  apply_user_scripts(webview, settings);
 
   webkit_user_content_manager_register_script_message_handler(
       webview->content_manager, "WebviewPlusChannel");

@@ -52,7 +52,8 @@ class _WebviewDemoPageState extends State<WebviewDemoPage> {
   bool _isInspectable = true;
   bool _transparentBackground = false;
   Color _initialBackgroundColor = Colors.cyan;
-  Color _selectionColor = Colors.orange;
+  Color _selectionTextColor = Colors.pink;
+  Color _selectionHandleColor = Colors.orange;
   Set<DefaultContextMenuItem> _disabledDefaultItems = <DefaultContextMenuItem>{};
   bool _disableLinkHoverPreview = true;
   bool _disablePrinting = false;
@@ -71,7 +72,8 @@ class _WebviewDemoPageState extends State<WebviewDemoPage> {
         isInspectable: _isInspectable,
         transparentBackground: _transparentBackground,
         initialBackgroundColor: _initialBackgroundColor,
-        selectionHandleColor: _selectionColor,
+        selectionTextColor: _selectionTextColor,
+        selectionHandleColor: _selectionHandleColor,
         disabledDefaultContextMenuItems: _disabledDefaultItems,
         disableLinkHoverPreview: _disableLinkHoverPreview,
         disablePrinting: _disablePrinting,
@@ -211,7 +213,7 @@ class _WebviewDemoPageState extends State<WebviewDemoPage> {
     });
   }
 
-  Future<void> _pickSelectionColor() async {
+  Future<Color?> _pickSelectionColor() async {
     const colors = [
       Colors.orange,
       Colors.pink,
@@ -219,7 +221,7 @@ class _WebviewDemoPageState extends State<WebviewDemoPage> {
       Colors.blue,
       Colors.red,
     ];
-    final chosen = await showDialog<Color>(
+    return await showDialog<Color>(
       context: context,
       builder: (context) => SimpleDialog(
         title: const Text('Couleur de sélection'),
@@ -239,9 +241,6 @@ class _WebviewDemoPageState extends State<WebviewDemoPage> {
             .toList(),
       ),
     );
-    if (chosen != null) {
-      setState(() => _selectionColor = chosen);
-    }
   }
 
   @override
@@ -508,12 +507,32 @@ class _WebviewDemoPageState extends State<WebviewDemoPage> {
           ListTile(
             title: const Text('Couleur d\'arrière-plan par défaut'),
             trailing: CircleAvatar(backgroundColor: _initialBackgroundColor),
-            onTap: _pickSelectionColor,
+            onTap: () async {
+              final chosen = await _pickSelectionColor();
+              if (chosen != null) {
+                setState(() => _initialBackgroundColor = chosen);
+              }
+            },
           ),
           ListTile(
-            title: const Text('Couleur de sélection de texte'),
-            trailing: CircleAvatar(backgroundColor: _selectionColor),
-            onTap: _pickSelectionColor,
+            title: const Text('Couleur des textes de selection'),
+            trailing: CircleAvatar(backgroundColor: _selectionTextColor),
+            onTap: () async {
+              final chosen = await _pickSelectionColor();
+              if (chosen != null) {
+                setState(() => _selectionTextColor = chosen);
+              }
+            },
+          ),
+          ListTile(
+            title: const Text('Couleur des handle de selection'),
+            trailing: CircleAvatar(backgroundColor: _selectionHandleColor),
+            onTap: () async {
+              final chosen = await _pickSelectionColor();
+              if (chosen != null) {
+                setState(() => _selectionHandleColor = chosen);
+              }
+            },
           ),
           const Divider(),
           Text(

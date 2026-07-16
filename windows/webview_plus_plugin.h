@@ -14,6 +14,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "platform/webview_platform.h"
 #include "rendering/texture_bridge_gpu.h"
@@ -138,8 +139,15 @@ class WebViewPlusInstance {
   bool disable_context_menu_ = false;
   bool disable_long_press_links_ = false;
   std::wstring selection_css_color_;
+  std::wstring selection_text_css_color_;
   bool disable_link_hover_preview_ = true;
   bool disable_printing_ = false;
+
+  // `initialUserScripts` (voir `WebviewSettings.initialUserScripts` côté
+  // Dart / `UserScript.toMap()`), partitionnés par moment d'injection.
+  // Remplis par `ApplySettings`, consommés par `InjectBridgeScript`.
+  std::vector<std::wstring> user_scripts_at_start_;
+  std::vector<std::wstring> user_scripts_at_end_;
 
   float scale_factor_ = 1.0f;
   POINT last_cursor_pos_ = {0, 0};

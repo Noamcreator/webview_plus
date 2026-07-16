@@ -10,6 +10,7 @@
 #include <limits>
 #include <map>
 #include <string>
+#include <vector>
 
 using flutter::EncodableList;
 using flutter::EncodableMap;
@@ -72,6 +73,66 @@ bool GetBoolOr(const EncodableMap& map, const char* key, bool def) {
   if (!v) return def;
   if (auto b = std::get_if<bool>(v)) return *b;
   return def;
+}
+
+// Convertit une couleur ARGB (telle qu'envoyée par Dart, `Color.toARGB32()`)
+// en littéral CSS `rgba(...)`. Renvoie une chaîne vide si `key` est absent
+// de `settings` (0 est une valeur ARGB valide - transparent noir - donc on
+// ne peut pas s'en servir comme sentinelle "absent").
+std::wstring ArgbToCssRgbaOr(const EncodableMap& settings, const char* key) {
+  const auto* color = FindKey(settings, key);
+  if (!color) return L"";
+
+  int64_t argb = 0;
+  if (auto v32 = std::get_if<int32_t>(color)) {
+    argb = *v32;
+  } else if (auto v64 = std::get_if<int64_t>(color)) {
+    argb = *v64;
+  } else {
+    return L"";
+  }
+
+  int a = static_cast<int>((argb >> 24) & 0xFF);
+  int r = static_cast<int>((argb >> 16) & 0xFF);
+  int g = static_cast<int>((argb >> 8) & 0xFF);
+  int b = static_cast<int>(argb & 0xFF);
+  wchar_t buf[64];
+  swprintf_s(buf, L"rgba(%d,%d,%d,%.3f)", r, g, b, a / 255.0);
+  return buf;
+}
+
+// Traduit `WebviewSettings.initialUserScripts` (liste de `EncodableMap`
+// côté Dart, voir `UserScript.toMap()`) en deux listes de scripts
+// (`atDocumentStart` / `atDocumentEnd`), converties en UTF-16 pour
+// l'injection WebView2.
+void ParseUserScripts(const EncodableMap& settings,
+                       std::vector<std::wstring>* out_start,
+                       std::vector<std::wstring>* out_end) {
+  out_start->clear();
+  out_end->clear();
+  const auto* raw = FindKey(settings, "initialUserScripts");
+  const auto* list = raw ? std::get_if<EncodableList>(raw) : nullptr;
+  if (!list) return;
+
+  for (const auto& entry_value : *list) {
+    const auto* entry = std::get_if<EncodableMap>(&entry_value);
+    if (!entry) continue;
+
+    const auto* source_value = FindKey(*entry, "source");
+    const auto* source_str =
+        source_value ? std::get_if<std::string>(source_value) : nullptr;
+    if (!source_str) continue;
+
+    bool is_end = false;
+    if (const auto* timing = FindKey(*entry, "injectionTime")) {
+      if (const auto* timing_str = std::get_if<std::string>(timing)) {
+        is_end = (*timing_str == "atDocumentEnd");
+      }
+    }
+
+    std::wstring source = Utf8ToWide(*source_str);
+    (is_end ? out_end : out_start)->push_back(source);
+  }
 }
 
 double GetFlutterScrollOffsetMultiplier() {
@@ -944,24 +1005,8 @@ void WebViewPlusInstance::ApplySettings(const EncodableMap& settings) {
     controller_->put_DefaultBackgroundColor(transparent);
   }
 
-  selection_css_color_.clear();
-  if (const auto* color = FindKey(settings, "selectionHandleColor")) {
-    int64_t argb = 0;
-    if (auto v32 = std::get_if<int32_t>(color)) {
-      argb = *v32;
-    } else if (auto v64 = std::get_if<int64_t>(color)) {
-      argb = *v64;
-    }
-    if (argb != 0) {
-      int a = static_cast<int>((argb >> 24) & 0xFF);
-      int r = static_cast<int>((argb >> 16) & 0xFF);
-      int g = static_cast<int>((argb >> 8) & 0xFF);
-      int b = static_cast<int>(argb & 0xFF);
-      wchar_t buf[64];
-      swprintf_s(buf, L"rgba(%d,%d,%d,%.3f)", r, g, b, a / 255.0);
-      selection_css_color_ = buf;
-    }
-  }
+  selection_css_color_ = ArgbToCssRgbaOr(settings, "selectionHandleColor");
+  selection_text_css_color_ = ArgbToCssRgbaOr(settings, "selectionHandleColor");
 
   disable_link_hover_preview_ =
       GetBoolOr(settings, "disableLinkHoverPreview", true);
@@ -969,17 +1014,30 @@ void WebViewPlusInstance::ApplySettings(const EncodableMap& settings) {
                                                                      : TRUE);
 
   disable_printing_ = GetBoolOr(settings, "disablePrinting", false);
+
+  // `initialUserScripts` : voir `ParseUserScripts` (helpers ci-dessus) et
+  // `InjectBridgeScript` (utilisation). `user_scripts_at_start_` /
+  // `user_scripts_at_end_` doivent être déclarés côté header de la classe,
+  // en `std::vector<std::wstring>`, au même titre que
+  // `selection_css_color_`.
+  ParseUserScripts(settings, &user_scripts_at_start_, &user_scripts_at_end_);
 }
 
 void WebViewPlusInstance::InjectBridgeScript() {
   std::wstring css_block;
-  if (!selection_css_color_.empty()) {
+  if (!selection_css_color_.empty() || !selection_text_css_color_.empty()) {
+    std::wstring background_rule = selection_css_color_.empty()
+        ? L""
+        : L"background:" + selection_css_color_ + L";";
+    std::wstring color_rule = selection_text_css_color_.empty()
+        ? L""
+        : L"color:" + selection_text_css_color_ + L";";
     css_block =
         L"document.addEventListener('DOMContentLoaded', function(){"
         L"var st=document.createElement('style');"
-        L"st.innerHTML='::selection{background:" +
-        selection_css_color_ +
-        L";}';"
+        L"st.innerHTML='::selection{" +
+        background_rule + color_rule +
+        L"}';"
         L"(document.head||document.documentElement).appendChild(st);});";
   }
 
@@ -988,10 +1046,33 @@ void WebViewPlusInstance::InjectBridgeScript() {
     print_block = L"window.print=function(){};";
   }
 
+  // `initialUserScripts` en atDocumentStart : exécutés à chaque création de
+  // document (avant même `if(window.webview_plus) return;`, pour qu'ils
+  // s'exécutent à chaque navigation et pas uniquement à la première).
+  std::wstring start_user_scripts_block;
+  for (const auto& source : user_scripts_at_start_) {
+    start_user_scripts_block += L"(function(){" + source + L"})();";
+  }
+
+  // `initialUserScripts` en atDocumentEnd : exécutés juste après
+  // DOMContentLoaded, avant la notification `onDOMContentLoaded` (le canal
+  // Dart, lui, est notifié séparément via l'évènement natif
+  // `add_DOMContentLoaded` de WebView2 — voir plus haut dans ce fichier).
+  std::wstring end_user_scripts_block;
+  for (const auto& source : user_scripts_at_end_) {
+    end_user_scripts_block += L"(function(){" + source + L"})();";
+  }
+  if (!end_user_scripts_block.empty()) {
+    end_user_scripts_block =
+        L"document.addEventListener('DOMContentLoaded', function(){" +
+        end_user_scripts_block + L"});";
+  }
+
   std::wstring script =
-      L"(function(){"
+      L"(function(){" +
+      start_user_scripts_block +
       L"if(window.webview_plus) return;" +
-      css_block + print_block +
+      css_block + print_block + end_user_scripts_block +
       L"var __fwCbId=0;var __fwCallbacks={};"
       L"window.webview_plus={"
       L"callHandler:function(handlerName){"

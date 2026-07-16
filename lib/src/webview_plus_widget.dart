@@ -38,6 +38,7 @@ class WebviewWidget extends StatefulWidget {
     this.onReceivedError,
     this.onWindowFocus,
     this.onWindowBlur,
+    this.onFontsIsLoaded,
     this.filterQuality = FilterQuality.none,
     this.contextMenuItems = const <ContextMenuItem>[],
   }) : assert(
@@ -66,6 +67,10 @@ class WebviewWidget extends StatefulWidget {
 
   final WebviewControllerCallback? onWindowFocus;
   final WebviewControllerCallback? onWindowBlur;
+
+  /// Appelé lorsque `document.fonts.ready` se résout pour la page chargée
+  /// (voir [WebviewFontsLoadedCallback]).
+  final WebviewFontsLoadedCallback? onFontsIsLoaded;
 
   /// Qualité de filtrage appliquée à la texture Windows (composition Webview2).
   final FilterQuality filterQuality;
@@ -224,6 +229,7 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
         onReceivedError: widget.onReceivedError,
         onWindowFocus: widget.onWindowFocus,
         onWindowBlur: widget.onWindowBlur,
+        onFontsIsLoaded: widget.onFontsIsLoaded,
         onCursorChanged: (_, cursorKind) {
           if (!mounted) return;
           setState(() => _windowsCursor = _cursorFromKind(cursorKind));
@@ -275,6 +281,7 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
         onLoadStop: widget.onLoadStop,
         onDOMContentLoaded: widget.onDOMContentLoaded,
         onReceivedError: widget.onReceivedError,
+        onFontsIsLoaded: widget.onFontsIsLoaded,
       );
 
       setState(() => _linuxCreated = true);
@@ -320,7 +327,6 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
   /// lui-même le curseur système : c'est donc la fenêtre Flutter (via ce
   /// `MouseRegion`) qui doit le faire.
   MouseCursor _cursorFromKind(String kind) {
-    print('cursorFromKind: $kind');
     switch (kind) {
       case 'click':
         return SystemMouseCursors.click;
@@ -661,6 +667,7 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
       onLoadStop: widget.onLoadStop,
       onDOMContentLoaded: widget.onDOMContentLoaded,
       onReceivedError: widget.onReceivedError,
+      onFontsIsLoaded: widget.onFontsIsLoaded,
       contextMenuItems: supportsContextMenuItems ? widget.contextMenuItems : const [],
     );
     _handleControllerCreated(controller);
