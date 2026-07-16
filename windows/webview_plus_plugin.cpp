@@ -1046,21 +1046,16 @@ void WebViewPlusInstance::InjectBridgeScript() {
     print_block = L"window.print=function(){};";
   }
 
-  // `initialUserScripts` en atDocumentStart : exécutés à chaque création de
-  // document (avant même `if(window.webview_plus) return;`, pour qu'ils
-  // s'exécutent à chaque navigation et pas uniquement à la première).
+  // On englobe chaque script utilisateur dans un try-catch pour isoler les erreurs
   std::wstring start_user_scripts_block;
   for (const auto& source : user_scripts_at_start_) {
-    start_user_scripts_block += L"(function(){" + source + L"})();";
+    start_user_scripts_block += L"try{(function(){" + source + L"})();}catch(e){console.error(e);}";
   }
 
-  // `initialUserScripts` en atDocumentEnd : exécutés juste après
-  // DOMContentLoaded, avant la notification `onDOMContentLoaded` (le canal
-  // Dart, lui, est notifié séparément via l'évènement natif
-  // `add_DOMContentLoaded` de WebView2 — voir plus haut dans ce fichier).
+  // Idem pour atDocumentEnd
   std::wstring end_user_scripts_block;
   for (const auto& source : user_scripts_at_end_) {
-    end_user_scripts_block += L"(function(){" + source + L"})();";
+    end_user_scripts_block += L"try{(function(){" + source + L"})();}catch(e){console.error(e);}";
   }
   if (!end_user_scripts_block.empty()) {
     end_user_scripts_block =
@@ -1068,11 +1063,10 @@ void WebViewPlusInstance::InjectBridgeScript() {
         end_user_scripts_block + L"});";
   }
 
+  // On initialise d'abord l'API webview_plus, et SEULEMENT APRÈS on lance les scripts utilisateurs
   std::wstring script =
-      L"(function(){" +
-      start_user_scripts_block +
-      L"if(window.webview_plus) return;" +
-      css_block + print_block + end_user_scripts_block +
+      L"(function(){"
+      L"if(!window.webview_plus){" // Initialisation sécurisée du bridge
       L"var __fwCbId=0;var __fwCallbacks={};"
       L"window.webview_plus={"
       L"callHandler:function(handlerName){"
@@ -1086,6 +1080,10 @@ void WebViewPlusInstance::InjectBridgeScript() {
       L"_rejectCallback:function(id,error){var cb=__fwCallbacks[id];if(cb){cb.reject(error);delete __fwCallbacks[id];}}"
       L"};"
       L"window.WebViewPlusChannel={postMessage:function(msg){window.chrome.webview.postMessage(msg);}};"
+      L"}"
+      + css_block + print_block + 
+      start_user_scripts_block + // Lancés en sécurité après la création du bridge
+      end_user_scripts_block +
       L"})();";
 
   if (webview_) {

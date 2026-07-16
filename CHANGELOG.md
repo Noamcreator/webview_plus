@@ -1,3 +1,7 @@
+## 0.7.1
+
+* Fixed Windows WebView bridge initialization: Isolated user scripts in try-catch blocks and optimized execution order to prevent custom scripts from blocking addJavaScriptHandler.
+
 ## 0.7.0
 
 * Add `selectionTextColor` setting on Android and iOS.
