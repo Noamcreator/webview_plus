@@ -79,6 +79,8 @@ class WebviewPlusPlatformView: WKWebView {
             LeakAvoidingScriptMessageHandler(self), name: "WebviewPlusJsHandler")
         userContentController.add(
             LeakAvoidingScriptMessageHandler(self), name: "WebviewPlusLinkHover")
+        userContentController.add(
+            LeakAvoidingScriptMessageHandler(self), name: "WebviewPlusDomContentLoaded")
 
         applySettings(settings)
 
@@ -211,6 +213,22 @@ class WebviewPlusPlatformView: WKWebView {
         (function(){
           if (window.webview_plus) return;
           \(cssBlock)
+
+          // Prévient Dart quand le DOM est prêt (équivalent de l'implémentation
+          // Android). Ce script est injecté via WKUserScript à
+          // `.atDocumentStart`, ce qui offre une meilleure garantie de timing
+          // qu'Android (evaluateJavascript depuis onPageStarted), mais on
+          // couvre quand même le cas où le document serait déjà chargé au
+          // moment où ce script s'exécute (frame secondaire tardive, etc.).
+          function __fwNotifyDomContentLoaded() {
+            window.webkit.messageHandlers.WebviewPlusDomContentLoaded.postMessage(window.location.href);
+          }
+          if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', __fwNotifyDomContentLoaded);
+          } else {
+            __fwNotifyDomContentLoaded();
+          }
+
           var __fwCbId = 0;
           var __fwCallbacks = {};
           window.webview_plus = {
@@ -259,6 +277,10 @@ class WebviewPlusPlatformView: WKWebView {
         case "WebviewPlusLinkHover":
             if let state = message.body as? String {
                 isHoveringLink = (state == "enter")
+            }
+        case "WebviewPlusDomContentLoaded":
+            if let url = message.body as? String {
+                channel.invokeMethod("onDOMContentLoaded", arguments: url)
             }
         case "WebviewPlusJsHandler":
             guard let body = message.body as? [String: Any],

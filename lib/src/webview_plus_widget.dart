@@ -122,7 +122,7 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
   // 23+) pour ne pas retarder l'affichage de la Webview le temps du
   // premier aller-retour de canal ; si l'appareil s'avère plus ancien, on
   // bascule vers le mode adapté dès que `setState` déclenche un rebuild.
-  int? _androidSdkInt;
+  int? _androidSdkInt = _cachedAndroidSdkInt;
 
   int? _windowsViewId;
   int? _windowsTextureId;
@@ -151,13 +151,31 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
   }
 
   Future<void> _loadAndroidSdkInt() async {
+    // Si on a déjà la valeur en cache, pas besoin d'aller plus loin
+    if (_cachedAndroidSdkInt != null) return;
+
     final sdk = await _getAndroidSdkInt();
     if (!mounted) return;
-    // Ne redéclenche un rebuild que si la valeur change réellement le
-    // choix de mode (évite un setState inutile si on était déjà sur
-    // l'hypothèse optimiste par défaut).
-    if (_androidSdkInt != sdk) {
-      setState(() => _androidSdkInt = sdk);
+
+    _cachedAndroidSdkInt = sdk;
+
+    // Déterminer si le mode de rendu réel (ex: SDK 33) impose 
+    // un changement par rapport au mode par défaut (SDK 23).
+    // Les deux étant >= 23, canUseSurfaceComposition reste 'true'.
+    final bool oldCanUseSurface = (_androidSdkInt ?? 23) >= 23;
+    final bool newCanUseSurface = sdk >= 23;
+
+    // IMPORTANT : On ne fait un setState QUE si le mode de rendu doit changer.
+    // Comme 23 et 33 utilisent tous les deux la Surface Composition, 
+    // oldCanUseSurface == newCanUseSurface (true == true). Aucun rebuild n'est déclenché !
+    if (oldCanUseSurface != newCanUseSurface) {
+      setState(() {
+        _androidSdkInt = sdk;
+      });
+    } 
+    else {
+      // On met juste à jour la variable locale sans reconstruire l'UI
+      _androidSdkInt = sdk;
     }
   }
 
@@ -302,6 +320,7 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
   /// lui-même le curseur système : c'est donc la fenêtre Flutter (via ce
   /// `MouseRegion`) qui doit le faire.
   MouseCursor _cursorFromKind(String kind) {
+    print('cursorFromKind: $kind');
     switch (kind) {
       case 'click':
         return SystemMouseCursors.click;
@@ -311,10 +330,25 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
         return SystemMouseCursors.wait;
       case 'precise':
         return SystemMouseCursors.precise;
+      
+      // Redimensionnement Horizontal (Bords Gauche et Droit sous Windows)
       case 'resizeLeftRight':
+      case 'resizeLeft':
+      case 'resizeRight':
         return SystemMouseCursors.resizeLeftRight;
+
+      // Redimensionnement Vertical (Bords Haut et Bas sous Windows)
       case 'resizeUpDown':
+      case 'resizeUp':
+      case 'resizeDown':
         return SystemMouseCursors.resizeUpDown;
+
+      // Redimensionnements Diagonaux (Coins de fenêtres)
+      case 'resizeUpLeftDownRight':
+        return SystemMouseCursors.resizeUpLeftDownRight;
+      case 'resizeUpRightDownLeft':
+        return SystemMouseCursors.resizeUpRightDownLeft;
+
       case 'allScroll':
         return SystemMouseCursors.allScroll;
       case 'forbidden':
@@ -451,21 +485,22 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
 
   @override
   Widget build(BuildContext context) {
+    // On extrait la couleur d'arrière-plan par défaut pour l'appliquer à toutes les plateformes
+    final Color backgroundColor = widget.initialSettings.initialBackgroundColor ?? Colors.transparent;
+
     if (kIsWeb) {
-      return web_impl.buildWebview(
-        initialUrl: widget.initialUrl,
-        initialAsset: widget.initialAsset,
-        onMessageReceived: widget.onMessageReceived,
-        onNavigationRequest: widget.onNavigationRequest,
-        onControllerCreated: _handleControllerCreated,
+      return Container(
+        color: backgroundColor,
+        child: web_impl.buildWebview(
+          initialUrl: widget.initialUrl,
+          initialAsset: widget.initialAsset,
+          onMessageReceived: widget.onMessageReceived,
+          onNavigationRequest: widget.onNavigationRequest,
+          onControllerCreated: _handleControllerCreated,
+        ),
       );
     }
 
-    // Les éléments personnalisés du menu contextuel (`ContextMenuItem`) ne
-    // concernent que la barre de sélection de texte native mobile
-    // (Android/iOS) : il n'existe pas d'équivalent sur desktop (le clic
-    // droit y ouvre un menu contextuel de navigateur classique, pas une
-    // barre de sélection), donc on ne l'envoie pas ailleurs.
     final bool supportsContextMenuItems = !kIsWeb &&
         (defaultTargetPlatform == TargetPlatform.android ||
             defaultTargetPlatform == TargetPlatform.iOS);
@@ -475,121 +510,112 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
       'initialAsset': widget.initialAsset,
       'initialFile': widget.initialFile,
       'initialSettings': widget.initialSettings.toMap(),
-      if (supportsContextMenuItems)
-        'contextMenuItems':
-            widget.contextMenuItems.map((e) => e.toMap()).toList(),
+      if (supportsContextMenuItems) 'contextMenuItems': widget.contextMenuItems.map((e) => e.toMap()).toList(),
     };
+
+    Widget platformWidget;
 
     switch (defaultTargetPlatform) {
       case TargetPlatform.android:
-        // Tant que le SDK réel n'est pas encore connu (aller-retour de
-        // canal asynchrone lancé dans initState), on part de l'hypothèse
-        // optimiste SDK >= 23 : c'est le cas de >99% du parc actif, et ça
-        // évite un flash / rebuild visible au premier affichage.
         final int effectiveSdkInt = _androidSdkInt ?? 23;
         final bool canUseSurfaceComposition = effectiveSdkInt >= 23;
 
-        if (canUseSurfaceComposition) {
-          // Mode recommandé : "Texture Layer Hybrid Composition". La
-          // Webview est portée par un vrai SurfaceView (scroll natif
-          // fluide), tout en restant compatible avec les
-          // animations/transitions Flutter (Stack, Hero, Dialog...) car le
-          // moteur peut la snapshotter en texture uniquement pendant les
-          // transformations, sans forcer ça en continu comme le fait
-          // `initExpensiveAndroidView`.
-          return PlatformViewLink(
-            viewType: _kViewType,
-            surfaceFactory: (context, controller) {
-              return AndroidViewSurface(
-                controller: controller as AndroidViewController,
-                gestureRecognizers: widget.gestureRecognizers ?? const <Factory<OneSequenceGestureRecognizer>>{},
-                hitTestBehavior: PlatformViewHitTestBehavior.opaque,
-              );
-            },
-            onCreatePlatformView: (params) {
-              return PlatformViewsService.initSurfaceAndroidView(
-                id: params.id,
-                viewType: _kViewType,
-                layoutDirection: widget.layoutDirection ?? TextDirection.ltr,
-                creationParams: creationParams,
-                creationParamsCodec: const StandardMessageCodec(),
-                onFocus: () => params.onFocusChanged(true),
-              )
-                ..addOnPlatformViewCreatedListener((id) {
-                  params.onPlatformViewCreated(id);
-                  _onPlatformViewCreated(id);
-                })
-                ..create();
-            },
-          );
-        } else if (widget.initialSettings.useHybridComposition) {
-          // Repli pour les appareils < API 23 uniquement : ancienne Hybrid
-          // Composition (jank possible pendant les animations Flutter,
-          // mais comportement natif correct sinon).
-          return PlatformViewLink(
-            viewType: _kViewType,
-            surfaceFactory: (context, controller) {
-              return AndroidViewSurface(
-                controller: controller as AndroidViewController,
-                gestureRecognizers: widget.gestureRecognizers ?? const <Factory<OneSequenceGestureRecognizer>>{},
-                hitTestBehavior: PlatformViewHitTestBehavior.opaque,
-              );
-            },
-            onCreatePlatformView: (params) {
-              return PlatformViewsService.initExpensiveAndroidView(
-                id: params.id,
-                viewType: _kViewType,
-                layoutDirection: widget.layoutDirection ?? TextDirection.ltr,
-                creationParams: creationParams,
-                creationParamsCodec: const StandardMessageCodec(),
-                onFocus: () => params.onFocusChanged(true),
-              )
-                ..addOnPlatformViewCreatedListener((id) {
-                  params.onPlatformViewCreated(id);
-                  _onPlatformViewCreated(id);
-                })
-                ..create();
-            },
-          );
-        } else {
-          // Repli final pour les appareils < API 23 : Virtual Display
-          // (TextureView). Scroll moins fluide mais aucun risque de
-          // dysfonctionnement sur du très vieux matériel.
-          return AndroidView(
-            viewType: _kViewType,
-            layoutDirection: widget.layoutDirection ?? TextDirection.ltr,
-            gestureRecognizers: widget.gestureRecognizers,
-            creationParams: creationParams,
-            creationParamsCodec: const StandardMessageCodec(),
-            onPlatformViewCreated: _onPlatformViewCreated,
-          );
+        AndroidPlatformViewType chosenType = widget.initialSettings.androidPlatformViewType;
+
+        if (chosenType == AndroidPlatformViewType.surfaceComposition && !canUseSurfaceComposition) {
+          chosenType = AndroidPlatformViewType.hybridComposition;
         }
 
+        switch (chosenType) {
+          case AndroidPlatformViewType.surfaceComposition:
+            platformWidget = PlatformViewLink(
+              viewType: _kViewType,
+              surfaceFactory: (context, controller) {
+                return AndroidViewSurface(
+                  controller: controller as AndroidViewController,
+                  gestureRecognizers: widget.gestureRecognizers ?? const <Factory<OneSequenceGestureRecognizer>>{},
+                  hitTestBehavior: PlatformViewHitTestBehavior.opaque,
+                );
+              },
+              onCreatePlatformView: (params) {
+                return PlatformViewsService.initSurfaceAndroidView(
+                  id: params.id,
+                  viewType: _kViewType,
+                  layoutDirection: widget.layoutDirection ?? TextDirection.ltr,
+                  creationParams: creationParams,
+                  creationParamsCodec: const StandardMessageCodec(),
+                  onFocus: () => params.onFocusChanged(true),
+                )
+                  ..addOnPlatformViewCreatedListener((id) {
+                    params.onPlatformViewCreated(id);
+                    _onPlatformViewCreated(id);
+                  })
+                  ..create();
+              },
+            );
+            break;
+
+          case AndroidPlatformViewType.hybridComposition:
+            platformWidget = PlatformViewLink(
+              viewType: _kViewType,
+              surfaceFactory: (context, controller) {
+                return AndroidViewSurface(
+                  controller: controller as AndroidViewController,
+                  gestureRecognizers: widget.gestureRecognizers ?? const <Factory<OneSequenceGestureRecognizer>>{},
+                  hitTestBehavior: PlatformViewHitTestBehavior.opaque,
+                );
+              },
+              onCreatePlatformView: (params) {
+                return PlatformViewsService.initExpensiveAndroidView(
+                  id: params.id,
+                  viewType: _kViewType,
+                  layoutDirection: widget.layoutDirection ?? TextDirection.ltr,
+                  creationParams: creationParams,
+                  creationParamsCodec: const StandardMessageCodec(),
+                  onFocus: () => params.onFocusChanged(true),
+                )
+                  ..addOnPlatformViewCreatedListener((id) {
+                    params.onPlatformViewCreated(id);
+                    _onPlatformViewCreated(id);
+                  })
+                  ..create();
+              },
+            );
+            break;
+
+          case AndroidPlatformViewType.virtualDisplay:
+            platformWidget = AndroidView(
+              viewType: _kViewType,
+              layoutDirection: widget.layoutDirection ?? TextDirection.ltr,
+              gestureRecognizers: widget.gestureRecognizers,
+              creationParams: creationParams,
+              creationParamsCodec: const StandardMessageCodec(),
+              onPlatformViewCreated: _onPlatformViewCreated,
+            );
+            break;
+        }
+        break;
+
       case TargetPlatform.iOS:
-        // iOS utilise systématiquement la composition native complète
-        // (équivalent de la hybrid composition Android) : il n'existe pas
-        // de mode "virtual display" ni de flag `useHybridComposition` côté
-        // UIKit, donc `initialSettings.useHybridComposition` est ignoré ici.
-        return UiKitView(
+        platformWidget = UiKitView(
           viewType: _kViewType,
           onPlatformViewCreated: _onPlatformViewCreated,
           creationParams: creationParams,
           creationParamsCodec: const StandardMessageCodec(),
         );
+        break;
 
       case TargetPlatform.macOS:
-        // Idem sur macOS : `AppKitView` (et non `UiKitView`, réservé à
-        // iOS/Mac Catalyst) compose nativement la NSView dans l'arbre
-        // Flutter, sans notion de hybrid composition.
-        return AppKitView(
+        platformWidget = AppKitView(
           viewType: _kViewType,
           onPlatformViewCreated: _onPlatformViewCreated,
           creationParams: creationParams,
           creationParamsCodec: const StandardMessageCodec(),
         );
+        break;
 
       case TargetPlatform.windows:
-        return LayoutBuilder(
+        platformWidget = LayoutBuilder(
           key: _windowsWidgetKey,
           builder: (context, constraints) {
             WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -602,25 +628,31 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
             );
           },
         );
+        break;
 
       case TargetPlatform.linux:
-        return _LinuxGeometryObserver(
-        onGeometryChanged: _handleLinuxGeometryChanged,
-        onDetached: () => _pushLinuxFrame(Rect.zero, visible: false),
-        child: const SizedBox.expand(),
-      );
+        platformWidget = _LinuxGeometryObserver(
+          onGeometryChanged: _handleLinuxGeometryChanged,
+          onDetached: () => _pushLinuxFrame(Rect.zero, visible: false),
+          child: const SizedBox.expand(),
+        );
+        break;
 
       default:
-        return const Center(
+        platformWidget = const Center(
           child: Text('Plateforme non supportée par webview_plus'),
         );
     }
+
+    // On encapsule la vue finale de la plateforme choisie dans un Container coloré
+    return Container(
+      color: backgroundColor,
+      child: platformWidget,
+    );
   }
 
   void _onPlatformViewCreated(int id) {
-    final bool supportsContextMenuItems = !kIsWeb &&
-        (defaultTargetPlatform == TargetPlatform.android ||
-            defaultTargetPlatform == TargetPlatform.iOS);
+    final bool supportsContextMenuItems = !kIsWeb && (defaultTargetPlatform == TargetPlatform.android || defaultTargetPlatform == TargetPlatform.iOS);
     final controller = WebviewPlusController.init(
       id,
       onNavigationRequest: widget.onNavigationRequest,

@@ -241,12 +241,13 @@ const WebviewSettings(
 | `displayZoomControls` | `false` | Android | Overlays physical zoom buttons directly inside screen layout. |
 | `mediaPlaybackRequiresUserGesture` | `true` | All | Prevents HTML5 videos/media from autoplaying without user clicks. |
 | `transparentBackground` | `false` | All | Makes the viewport background transparent to display Flutter widgets behind. |
+| `initialBackgroundColor` | `null` | All | Optional default color painted as a fallback behind transparent areas or while the Webview initially initializes. |
 | `userAgent` | `null` | All | Override target browser layout engine header. `null` falls back to system default. |
 | `isInspectable` | `false` | All | Opens hooks for Safari Web Inspector or Chrome DevTools remote attachment. |
 | `disableContextMenu` | `false` | Android/iOS | Disables long-press menus and touch selection interactions completely. |
 | `disableLongPressContextMenuOnLinks`| `false` | Android/iOS | Prevents special links preview/copy contextual windows specifically. |
-| `selectionHandleColor` | `null` | Android | *Best effort:* Stylizes text highlight color boundaries via runtime CSS injection. |
-| `useHybridComposition` | `true` | Android | **Fallback only, API < 23.** On API 23+, the plugin always uses Texture Layer Hybrid Composition (best of both worlds) regardless of this flag. Below API 23, `true` uses classic Hybrid Composition (correct native behavior, but can be janky during Flutter animations), `false` uses Virtual Display (smooth Flutter animations, but slightly less fluid native scroll). |
+| `selectionHandleColor` | `AndroidPlatformViewType.surfaceComposition` | Android | Choose Android rendering mode: surfaceComposition (Texture Layer Hybrid Composition), hybridComposition (Classic Hybrid Composition), or virtualDisplay. On API < 23, surfaceComposition automatically falls back to hybridComposition (initExpensiveAndroidView) to ensure proper rendering. |
+| `androidPlatformViewType` | `true` | Android | **Fallback only, API < 23.** On API 23+, the plugin always uses Texture Layer Hybrid Composition (best of both worlds) regardless of this flag. Below API 23, `true` uses classic Hybrid Composition (correct native behavior, but can be janky during Flutter animations), `false` uses Virtual Display (smooth Flutter animations, but slightly less fluid native scroll). |
 | `allowsBackForwardNavigationGestures`| `false` | iOS | Enables edge swipe gesture history forward/backward navigations. |
 | `allowsLinkPreview` | `false` | iOS | Enables 3D Touch/Long Press link "Peek and Pop" preview panels. |
 | `disableLinkHoverPreview` | `true` | Desktop | Hides status bar hover URL strings appearing at the bottom of the pane (Windows). |

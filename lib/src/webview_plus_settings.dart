@@ -2,6 +2,18 @@ import 'package:flutter/painting.dart' show Color;
 
 import 'webview_plus_context_menu.dart';
 
+enum AndroidPlatformViewType {
+  /// Texture Layer Hybrid Composition (recommandé, API 23+).
+  surfaceComposition,
+
+  /// Hybrid Composition classique (génère parfois du jank d'animation, mais robuste).
+  hybridComposition,
+
+  /// Virtual Display (TextureView). Défilement potentiellement moins fluide,
+  /// mais très compatible avec le vieux matériel.
+  virtualDisplay,
+}
+
 /// Regroupe l'ensemble des réglages initiaux applicables à la Webview.
 ///
 /// Passé via `WebviewPlus(initialSettings: ...)`, transmis sous forme
@@ -19,12 +31,13 @@ class WebviewSettings {
     this.displayZoomControls = false,
     this.mediaPlaybackRequiresUserGesture = true,
     this.transparentBackground = false,
+    this.initialBackgroundColor,
     this.userAgent,
     this.isInspectable = false,
     this.disableContextMenu = false,
     this.disableLongPressContextMenuOnLinks = false,
     this.selectionHandleColor,
-    this.useHybridComposition = true,
+    this.androidPlatformViewType = AndroidPlatformViewType.surfaceComposition,
     this.allowsBackForwardNavigationGestures = false,
     this.allowsLinkPreview = false,
     this.disabledDefaultContextMenuItems = const <DefaultContextMenuItem>{},
@@ -62,6 +75,10 @@ class WebviewSettings {
   /// contenu Flutter derrière/au-dessus de la page).
   final bool transparentBackground;
 
+  /// Couleur d'arrière-plan par défaut du widget pendant son chargement
+  /// ou si l'arrière-plan de la Webview est transparent.
+  final Color? initialBackgroundColor;
+
   /// User-Agent personnalisé. `null` = valeur par défaut de la plateforme.
   final String? userAgent;
 
@@ -89,9 +106,9 @@ class WebviewSettings {
   /// thème Android de l'application hôte.
   final Color? selectionHandleColor;
 
-  /// Utilise le mode de composition hybride Android (recommandé, corrige
-  /// de nombreux soucis de scroll/clavier) plutôt que le mode virtuel.
-  final bool useHybridComposition;
+  /// Type de composition et rendu sur Android.
+  /// Par défaut : [AndroidPlatformViewType.surfaceComposition].
+  final AndroidPlatformViewType androidPlatformViewType;
 
   /// Autorise les gestes de balayage pour naviguer précédent/suivant (iOS).
   final bool allowsBackForwardNavigationGestures;
@@ -130,13 +147,14 @@ class WebviewSettings {
         'displayZoomControls': displayZoomControls,
         'mediaPlaybackRequiresUserGesture': mediaPlaybackRequiresUserGesture,
         'transparentBackground': transparentBackground,
+        'initialBackgroundColor': initialBackgroundColor?.toARGB32(),
         'userAgent': userAgent,
         'isInspectable': isInspectable,
         'disableContextMenu': disableContextMenu,
         'disableLongPressContextMenuOnLinks':
             disableLongPressContextMenuOnLinks,
         'selectionHandleColor': selectionHandleColor?.toARGB32(),
-        'useHybridComposition': useHybridComposition,
+        'androidPlatformViewType': androidPlatformViewType.name,
         'allowsBackForwardNavigationGestures':
             allowsBackForwardNavigationGestures,
         'allowsLinkPreview': allowsLinkPreview,

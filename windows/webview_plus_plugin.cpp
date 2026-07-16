@@ -603,8 +603,10 @@ void WebViewPlusInstance::InitializeWebView2() {
                 return S_OK;
               }
 
-              controller_->put_BoundsMode(
-                  COREWEBVIEW2_BOUNDS_MODE_USE_RAW_PIXELS);
+              COREWEBVIEW2_COLOR transparent{0, 0, 0, 0};
+              controller_->put_DefaultBackgroundColor(transparent);
+
+              controller_->put_BoundsMode(COREWEBVIEW2_BOUNDS_MODE_USE_RAW_PIXELS);
               controller_->put_ShouldDetectMonitorScaleChanges(FALSE);
               controller_->put_RasterizationScale(1.0);
 
@@ -681,8 +683,7 @@ void WebViewPlusInstance::InitializeWebView2() {
                         }
                         channel_->InvokeMethod(
                             "onCursorChanged",
-                            std::make_unique<EncodableValue>(
-                                CursorKindFromHandle(cursor)));
+                            std::make_unique<EncodableValue>(CursorKindFromHandle(cursor)));
                         return S_OK;
                       })
                       .Get(),
@@ -1392,6 +1393,8 @@ std::string WebViewPlusInstance::CursorKindFromHandle(HCURSOR cursor) {
   static const HCURSOR kCross = LoadCursor(nullptr, IDC_CROSS);
   static const HCURSOR kSizeWE = LoadCursor(nullptr, IDC_SIZEWE);
   static const HCURSOR kSizeNS = LoadCursor(nullptr, IDC_SIZENS);
+  static const HCURSOR kSizeNWSE = LoadCursor(nullptr, IDC_SIZENWSE); // Diagonale haut-gauche / bas-droite (\)
+  static const HCURSOR kSizeNESW = LoadCursor(nullptr, IDC_SIZENESW); // Diagonale haut-droite / bas-gauche (/)
   static const HCURSOR kSizeAll = LoadCursor(nullptr, IDC_SIZEALL);
   static const HCURSOR kNo = LoadCursor(nullptr, IDC_NO);
 
@@ -1402,9 +1405,12 @@ std::string WebViewPlusInstance::CursorKindFromHandle(HCURSOR cursor) {
   if (cursor == kCross) return "precise";
   if (cursor == kSizeWE) return "resizeLeftRight";
   if (cursor == kSizeNS) return "resizeUpDown";
+  if (cursor == kSizeNWSE) return "resizeUpLeftDownRight";
+  if (cursor == kSizeNESW) return "resizeUpRightDownLeft";
   if (cursor == kSizeAll) return "allScroll";
   if (cursor == kNo) return "forbidden";
   if (cursor == kArrow) return "basic";
+  
   return "basic";
 }
 

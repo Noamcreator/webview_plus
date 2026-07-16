@@ -106,7 +106,7 @@ class WebviewPlusPlatformView(
     @SuppressLint("SetJavaScriptEnabled", "JavascriptInterface")
     private fun setupWebview(context: Context, settings: Map<String, Any?>?) {
         // Optimisation matérielle pour un défilement fluide
-        webView.setLayerType(View.LAYER_TYPE_HARDWARE, null)
+        webView.setLayerType(View.LAYER_TYPE_SOFTWARE, null)
 
         // Supprime l'effet "glow" en haut/bas de page au scroll : évite un
         // repaint supplémentaire à chaque frame de dépassement de bord.
@@ -200,6 +200,7 @@ class WebviewPlusPlatformView(
             }
 
             override fun onPageFinished(view: WebView, url: String) {
+                webView.setLayerType(View.LAYER_TYPE_HARDWARE, null)
                 mainHandler.post { channel.invokeMethod("onLoadStop", url) }
             }
 
@@ -251,8 +252,7 @@ class WebviewPlusPlatformView(
         s.setSupportZoom((settings?.get("supportZoom") as? Boolean) ?: true)
         s.builtInZoomControls = (settings?.get("builtInZoomControls") as? Boolean) ?: true
         s.displayZoomControls = (settings?.get("displayZoomControls") as? Boolean) ?: false
-        s.mediaPlaybackRequiresUserGesture =
-            (settings?.get("mediaPlaybackRequiresUserGesture") as? Boolean) ?: true
+        s.mediaPlaybackRequiresUserGesture = (settings?.get("mediaPlaybackRequiresUserGesture") as? Boolean) ?: true
 
         // Cache HTTP standard (respecte les en-têtes serveur type
         // Cache-Control/ETag) : c'est déjà la valeur par défaut d'Android,

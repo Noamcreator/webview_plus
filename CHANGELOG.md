@@ -1,3 +1,11 @@
+## 0.6.3
+
+* Add `onDOMContentLoaded` callback on IOS, MacOS and Linux.
+* Add mouse cursor change (onCursorChanged) support on Windows (the diagonal resize cursors).
+* Android and Windows bug: A white screen appears while the WebView is loading, even when transparency is enabled.
+* Add `initialBackgroundColor` setting across all platforms to eliminate the white screen/flash of unpainted content during initialization and loading.
+* Replace `useHybridComposition` with `AndroidPlatformViewType` enum, featuring automatic fallback to Hybrid Composition (`initExpensiveAndroidView`) on devices below Android SDK 23.
+
 ## 0.6.2
 
 * Fixed the `onDOMContentLoaded` callback not being called on all platforms.

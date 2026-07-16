@@ -139,6 +139,19 @@ static void channel_message_cb(WebKitUserContentManager *manager,
   invoke_method(webview, "onMessageReceived", args);
 }
 
+static void dom_content_loaded_message_cb(WebKitUserContentManager *manager,
+                                          WebKitJavascriptResult *js_result,
+                                          gpointer user_data) {
+  LinuxWebview *webview = static_cast<LinuxWebview *>(user_data);
+  JSCValue *value = webkit_javascript_result_get_js_value(js_result);
+  g_autofree gchar *url = jsc_value_to_string(value);
+  if (url == nullptr) {
+    return;
+  }
+  g_autoptr(FlValue) args = fl_value_new_string(url);
+  invoke_method(webview, "onDOMContentLoaded", args);
+}
+
 // -- Navigation -------------------------------------------------------
 
 static void navigation_request_finished_cb(GObject *object,
@@ -373,6 +386,14 @@ void apply_bridge_script(LinuxWebview *webview, const gchar *selection_css) {
       "(function(){"
       "  if (window.webview_plus) return;"
       "  %s"
+      "  function __fwNotifyDomContentLoaded() {"
+      "    window.webkit.messageHandlers.WebviewPlusDomContentLoaded.postMessage(window.location.href);"
+      "  }"
+      "  if (document.readyState === 'loading') {"
+      "    document.addEventListener('DOMContentLoaded', __fwNotifyDomContentLoaded);"
+      "  } else {"
+      "    __fwNotifyDomContentLoaded();"
+      "  }"
       "  var __fwCbId = 0;"
       "  var __fwCallbacks = {};"
       "  window.webview_plus = {"
@@ -495,12 +516,17 @@ LinuxWebview *create_linux_webview(WebviewPlusPlugin *self, gint64 view_id,
       webview->content_manager, "WebviewPlusChannel");
   webkit_user_content_manager_register_script_message_handler(
       webview->content_manager, "WebviewPlusJsHandler");
+  webkit_user_content_manager_register_script_message_handler(
+      webview->content_manager, "WebviewPlusDomContentLoaded");
   g_signal_connect(webview->content_manager,
                    "script-message-received::WebviewPlusChannel",
                    G_CALLBACK(channel_message_cb), webview);
   g_signal_connect(webview->content_manager,
                    "script-message-received::WebviewPlusJsHandler",
                    G_CALLBACK(js_handler_message_cb), webview);
+  g_signal_connect(webview->content_manager,
+                   "script-message-received::WebviewPlusDomContentLoaded",
+                   G_CALLBACK(dom_content_loaded_message_cb), webview);
 
   g_signal_connect(webview->web_view, "decide-policy",
                    G_CALLBACK(decide_policy_cb), webview);

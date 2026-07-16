@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:webview_plus/webview_plus.dart';
 
@@ -50,6 +51,7 @@ class _WebviewDemoPageState extends State<WebviewDemoPage> {
   bool _disableLongPressLinks = false;
   bool _isInspectable = true;
   bool _transparentBackground = false;
+  Color _initialBackgroundColor = Colors.cyan;
   Color _selectionColor = Colors.orange;
   Set<DefaultContextMenuItem> _disabledDefaultItems = <DefaultContextMenuItem>{};
   bool _disableLinkHoverPreview = true;
@@ -68,6 +70,7 @@ class _WebviewDemoPageState extends State<WebviewDemoPage> {
         disableLongPressContextMenuOnLinks: _disableLongPressLinks,
         isInspectable: _isInspectable,
         transparentBackground: _transparentBackground,
+        initialBackgroundColor: _initialBackgroundColor,
         selectionHandleColor: _selectionColor,
         disabledDefaultContextMenuItems: _disabledDefaultItems,
         disableLinkHoverPreview: _disableLinkHoverPreview,
@@ -323,7 +326,9 @@ class _WebviewDemoPageState extends State<WebviewDemoPage> {
               },
               onLoadStop: (controller, url) {
                 final time = DateTime.now().millisecondsSinceEpoch;
-                print('WEBVIEW LOADING onLoadStop $time $url');
+                if (kDebugMode) {
+                  print('WEBVIEW LOADING onLoadStop $time $url');
+                }
                 setState(() {
                   _isLoading = false;
                   _status = 'Chargé : $url';
@@ -332,7 +337,9 @@ class _WebviewDemoPageState extends State<WebviewDemoPage> {
               },
               onDOMContentLoaded: (controller, url) {
                 final time = DateTime.now().millisecondsSinceEpoch;
-                print('WEBVIEW LOADING onDOMContentLoaded $time $url');
+                if (kDebugMode) {
+                  print('WEBVIEW LOADING onDOMContentLoaded $time $url');
+                }
                 setState(() {
                   _status = 'DOM Content Loaded : $url';
                 });
@@ -497,6 +504,11 @@ class _WebviewDemoPageState extends State<WebviewDemoPage> {
             title: const Text('Fond transparent'),
             value: _transparentBackground,
             onChanged: (v) => setState(() => _transparentBackground = v),
+          ),
+          ListTile(
+            title: const Text('Couleur d\'arrière-plan par défaut'),
+            trailing: CircleAvatar(backgroundColor: _initialBackgroundColor),
+            onTap: _pickSelectionColor,
           ),
           ListTile(
             title: const Text('Couleur de sélection de texte'),

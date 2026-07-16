@@ -65,6 +65,8 @@ class WebviewPlusPlatformView: NSObject, FlutterPlatformView {
             LeakAvoidingScriptMessageHandler(self), name: "WebviewPlusChannel")
         userContentController.add(
             LeakAvoidingScriptMessageHandler(self), name: "WebviewPlusJsHandler")
+        userContentController.add(
+            LeakAvoidingScriptMessageHandler(self), name: "WebviewPlusDomContentLoaded")
         userContentController.addUserScript(WKUserScript(
             source: bridgeScript(),
             injectionTime: .atDocumentStart,
@@ -192,6 +194,16 @@ class WebviewPlusPlatformView: NSObject, FlutterPlatformView {
         (function(){
           if (window.webview_plus) return;
           \(cssBlock)
+
+          function __fwNotifyDomContentLoaded() {
+            window.webkit.messageHandlers.WebviewPlusDomContentLoaded.postMessage(window.location.href);
+          }
+          if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', __fwNotifyDomContentLoaded);
+          } else {
+            __fwNotifyDomContentLoaded();
+          }
+
           var __fwCbId = 0;
           var __fwCallbacks = {};
           window.webview_plus = {
@@ -228,6 +240,10 @@ class WebviewPlusPlatformView: NSObject, FlutterPlatformView {
         case "WebviewPlusChannel":
             if let text = message.body as? String {
                 channel.invokeMethod("onMessageReceived", arguments: text)
+            }
+        case "WebviewPlusDomContentLoaded":
+            if let url = message.body as? String {
+                channel.invokeMethod("onDOMContentLoaded", arguments: url)
             }
         case "WebviewPlusJsHandler":
             guard let body = message.body as? [String: Any],
