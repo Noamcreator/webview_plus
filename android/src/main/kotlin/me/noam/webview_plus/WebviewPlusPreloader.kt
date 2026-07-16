@@ -42,6 +42,17 @@ object WebviewPlusPreloader {
     private val enginePool = ArrayDeque<WebView>()
     private val activePreloads = mutableMapOf<String, WebView>()
 
+    // Mémorisés lors du premier `warmUp`, pour pouvoir réapprovisionner le
+    // pool tout seul depuis `acquireWarmedEngine` sans que l'appelant Dart
+    // ait besoin de rappeler `warmUp` à chaque fois qu'une WebView est
+    // consommée. Sans ça, seul le tout premier document ouvert dans la
+    // session bénéficie d'une WebView pré-chauffée : le pool, rempli une
+    // seule fois au démarrage avec `count: 1`, reste ensuite vide pour
+    // toujours et chaque document suivant repart d'un `WebView(context)`
+    // froid.
+    private var appContextRef: Context? = null
+    private var targetPoolSize: Int = 0
+
     // Durée après laquelle une Webview de préchargement réseau est détruite
     // si elle n'a pas déjà été nettoyée par `onPageFinished`. Filet de
     // sécurité pour les URLs qui ne finissent jamais de charger.
@@ -57,6 +68,9 @@ object WebviewPlusPreloader {
             return
         }
         val appContext = context.applicationContext
+        appContextRef = appContext
+        targetPoolSize = maxOf(targetPoolSize, count)
+
         val missing = count - enginePool.size
         if (missing <= 0) return
         repeat(missing) {
@@ -71,8 +85,27 @@ object WebviewPlusPreloader {
     /// Retire et renvoie une `WebView` pré-construite du pool si
     /// disponible, sinon `null` (l'appelant doit alors construire une
     /// `WebView` normalement). Doit être appelé depuis le thread principal.
+    ///
+    /// Reconstruit aussitôt une WebView de remplacement en arrière-plan
+    /// (idle, hors du chemin critique de l'ouverture en cours) pour que le
+    /// pool reste à `targetPoolSize` : le document suivant profite lui
+    /// aussi d'une instance pré-chauffée, pas seulement le premier.
     fun acquireWarmedEngine(): WebView? {
-        return enginePool.removeFirstOrNull()
+        val engine = enginePool.removeFirstOrNull()
+        if (engine != null) {
+            scheduleRefill()
+        }
+        return engine
+    }
+
+    private fun scheduleRefill() {
+        val context = appContextRef ?: return
+        if (enginePool.size >= targetPoolSize) return
+        // `post` (et non `postDelayed`) : on laisse simplement passer la
+        // frame en cours (celle qui affiche le document qui vient de
+        // consommer une WebView du pool) avant de reconstruire, pour ne
+        // jamais entrer en concurrence avec elle sur le thread principal.
+        mainHandler.post { warmUp(context, targetPoolSize) }
     }
 
     /// Déclenche un préchargement réseau best-effort de [url] : les

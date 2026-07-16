@@ -405,12 +405,28 @@ class WebviewPlusPlatformView(
         val js = """
             (function() {
               if (window.webview_plus) return;
-              document.addEventListener('DOMContentLoaded', function() {
+
+              function __fwNotifyDomContentLoaded() {
                 $cssInjection
                 if (window.WebviewPlusDomContentLoaded) {
                   window.WebviewPlusDomContentLoaded.onDOMContentLoaded(window.location.href);
                 }
-              });
+              }
+
+              // Ce script est injecté de façon asynchrone depuis onPageStarted
+              // (evaluateJavascript), ce qui n'offre aucune garantie de timing :
+              // sur une page qui charge très vite (peu/pas de script bloquant),
+              // l'évènement DOMContentLoaded peut déjà avoir eu lieu avant que ce
+              // script n'ait eu la main pour attacher son listener — auquel cas
+              // il ne se redéclenchera jamais. On couvre donc les deux cas :
+              // écouter l'évènement s'il n'a pas encore eu lieu, ou notifier
+              // immédiatement si le document est déjà prêt.
+              if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', __fwNotifyDomContentLoaded);
+              } else {
+                __fwNotifyDomContentLoaded();
+              }
+
               var __fwCallbackId = 0;
               var __fwCallbacks = {};
               window.webview_plus = {
@@ -687,23 +703,26 @@ class WebviewPlusPlatformView(
 
 class WebviewPlusJsBridge(private val onMessage: (String) -> Unit) {
     @JavascriptInterface
-    fun postMessage(message: String?) {
-        onMessage(message ?: "")
+    fun postMessage(message: String) {
+        onMessage(message)
     }
 }
 
-class WebviewPlusDomContentLoadedBridge(private val onDOMContentLoaded: (String) -> Unit) {
+class WebviewPlusDomContentLoadedBridge(private val callback: (String) -> Unit) {
     @JavascriptInterface
-    fun onDOMContentLoaded(url: String?) { // Type rendu nullable (String?)
-        onDOMContentLoaded(url ?: "")
+    fun onDOMContentLoaded(url: String) {
+        callback(url)
     }
 }
 
+/// Pont JS <-> Dart utilisé par `window.webview_plus.callHandler(...)`.
+/// `onCall` reçoit (nomDuHandler, argumentsEnJSON, idDeCallback) et est
+/// invoqué sur le thread JS ; il doit poster sur le thread principal.
 class WebviewPlusJsHandlerBridge(
     private val onCall: (handlerName: String, argsJson: String, callbackId: String) -> Unit
 ) {
     @JavascriptInterface
-    fun callHandler(handlerName: String?, argsJson: String?, callbackId: String?) {
-        onCall(handlerName ?: "", argsJson ?: "[]", callbackId ?: "")
+    fun callHandler(handlerName: String, argsJson: String, callbackId: String) {
+        onCall(handlerName, argsJson, callbackId)
     }
 }

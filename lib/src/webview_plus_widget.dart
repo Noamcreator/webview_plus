@@ -202,6 +202,7 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
         onMessageReceived: widget.onMessageReceived,
         onLoadStart: widget.onLoadStart,
         onLoadStop: widget.onLoadStop,
+        onDOMContentLoaded: widget.onDOMContentLoaded,
         onReceivedError: widget.onReceivedError,
         onWindowFocus: widget.onWindowFocus,
         onWindowBlur: widget.onWindowBlur,
@@ -254,6 +255,7 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
         onMessageReceived: widget.onMessageReceived,
         onLoadStart: widget.onLoadStart,
         onLoadStop: widget.onLoadStop,
+        onDOMContentLoaded: widget.onDOMContentLoaded,
         onReceivedError: widget.onReceivedError,
       );
 
@@ -625,6 +627,7 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
       onMessageReceived: widget.onMessageReceived,
       onLoadStart: widget.onLoadStart,
       onLoadStop: widget.onLoadStop,
+      onDOMContentLoaded: widget.onDOMContentLoaded,
       onReceivedError: widget.onReceivedError,
       contextMenuItems: supportsContextMenuItems ? widget.contextMenuItems : const [],
     );

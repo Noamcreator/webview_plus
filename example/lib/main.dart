@@ -322,6 +322,8 @@ class _WebviewDemoPageState extends State<WebviewDemoPage> {
                 });
               },
               onLoadStop: (controller, url) {
+                final time = DateTime.now().millisecondsSinceEpoch;
+                print('WEBVIEW LOADING onLoadStop $time $url');
                 setState(() {
                   _isLoading = false;
                   _status = 'Chargé : $url';
@@ -329,7 +331,8 @@ class _WebviewDemoPageState extends State<WebviewDemoPage> {
                 });
               },
               onDOMContentLoaded: (controller, url) {
-                print('onDOMContentLoaded $url');
+                final time = DateTime.now().millisecondsSinceEpoch;
+                print('WEBVIEW LOADING onDOMContentLoaded $time $url');
                 setState(() {
                   _status = 'DOM Content Loaded : $url';
                 });
