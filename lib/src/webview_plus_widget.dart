@@ -309,30 +309,28 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
   }
 
   Future<void> _loadAndroidSdkInt() async {
-    // Si on a déjà la valeur en cache, pas besoin d'aller plus loin
-    if (_cachedAndroidSdkInt != null) return;
+    if (_cachedAndroidSdkInt != null) {
+      if (_androidSdkInt != _cachedAndroidSdkInt) {
+        setState(() {
+          _androidSdkInt = _cachedAndroidSdkInt;
+        });
+      }
+      return;
+    }
 
     final sdk = await _getAndroidSdkInt();
     if (!mounted) return;
 
     _cachedAndroidSdkInt = sdk;
 
-    // Déterminer si le mode de rendu réel (ex: SDK 33) impose 
-    // un changement par rapport au mode par défaut (SDK 23).
-    // Les deux étant >= 23, canUseSurfaceComposition reste 'true'.
     final bool oldCanUseSurface = (_androidSdkInt ?? 23) >= 23;
     final bool newCanUseSurface = sdk >= 23;
 
-    // IMPORTANT : On ne fait un setState QUE si le mode de rendu doit changer.
-    // Comme 23 et 33 utilisent tous les deux la Surface Composition, 
-    // oldCanUseSurface == newCanUseSurface (true == true). Aucun rebuild n'est déclenché !
     if (oldCanUseSurface != newCanUseSurface) {
       setState(() {
         _androidSdkInt = sdk;
       });
-    } 
-    else {
-      // On met juste à jour la variable locale sans reconstruire l'UI
+    } else {
       _androidSdkInt = sdk;
     }
   }

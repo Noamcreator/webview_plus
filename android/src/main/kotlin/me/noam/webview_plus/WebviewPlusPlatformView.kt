@@ -178,9 +178,6 @@ class WebviewPlusPlatformView(
 
     @SuppressLint("SetJavaScriptEnabled", "JavascriptInterface")
     private fun setupWebview(context: Context, settings: Map<String, Any?>?) {
-        // Optimisation matérielle pour un défilement fluide
-        webView.setLayerType(View.LAYER_TYPE_SOFTWARE, null)
-
         // Supprime l'effet "glow" en haut/bas de page au scroll : évite un
         // repaint supplémentaire à chaque frame de dépassement de bord.
         webView.overScrollMode = View.OVER_SCROLL_NEVER
@@ -191,6 +188,26 @@ class WebviewPlusPlatformView(
         webView.isNestedScrollingEnabled = true
 
         applySettings(settings)
+
+        // --- CORRECTIF #3 -------------------------------------------------
+        // Layer type initial. HARDWARE par défaut : c'est ce mode que
+        // suppose `initSurfaceAndroidView` (Texture Layer Hybrid
+        // Composition, voir `webview_plus_widget.dart` /
+        // `_getAndroidSdkInt`) pour composer la WebView comme une texture
+        // GPU au sein de l'arbre Flutter sans jank. Ne PAS forcer
+        // LAYER_TYPE_SOFTWARE ici : ça revient à rastériser tout le
+        // contenu (scroll compris) au CPU à chaque frame, ce qui annule le
+        // bénéfice du mode de composition choisi côté Dart.
+        //
+        // Exception : fond transparent. Même logique que dans
+        // `onPageFinished` (CORRECTIF #2) — `setBackgroundColor(TRANSPARENT)`
+        // ne compose l'alpha de façon fiable qu'en layer SOFTWARE sur une
+        // bonne partie des versions/GPU Android ; en HARDWARE on obtient un
+        // flash noir (frame opaque) au lieu de la transparence attendue.
+        webView.setLayerType(
+            if (isTransparentBackground) View.LAYER_TYPE_SOFTWARE else View.LAYER_TYPE_HARDWARE,
+            null
+        )
 
         // --- CORRECTIF #1 (suite) --------------------------------------
         // Injecte `userScriptsAtStart` (ex : le script de sync de thème
@@ -301,13 +318,24 @@ class WebviewPlusPlatformView(
             }
 
             override fun onPageFinished(view: WebView, url: String) {
-                // --- CORRECTIF #2 --------------------------------------
-                // Ne repasse en hardware layer que si le fond n'est PAS
-                // transparent : c'est cette combinaison précise
-                // (setBackgroundColor(TRANSPARENT) + LAYER_TYPE_HARDWARE)
-                // qui casse la composition de l'alpha et provoque un
-                // flash noir juste après le chargement de la page.
-                if (!isTransparentBackground) {
+                // --- CORRECTIF #2 (révisé) ------------------------------
+                // Fond transparent : `setBackgroundColor(TRANSPARENT)` +
+                // `LAYER_TYPE_HARDWARE` peut provoquer un flash noir sur le
+                // tout premier composite juste après le chargement (avant
+                // que l'alpha ne soit correctement pris en compte par ce
+                // layer). Mais rester en LAYER_TYPE_SOFTWARE en continu
+                // (l'ancienne version de ce correctif) désactive
+                // l'accélération matérielle pour toute la durée de vie de
+                // la vue -> rendu CPU permanent, scroll qui rame. On ne
+                // reste donc en software que le temps de laisser ce
+                // premier composite transparent se stabiliser, puis on
+                // repasse en hardware comme le faisait la version stable
+                // précédente (voir historique).
+                if (isTransparentBackground) {
+                    webView.postDelayed({
+                        webView.setLayerType(View.LAYER_TYPE_HARDWARE, null)
+                    }, 32L) // ~2 frames à 60Hz
+                } else {
                     webView.setLayerType(View.LAYER_TYPE_HARDWARE, null)
                 }
                 mainHandler.post { channel.invokeMethod("onLoadStop", url) }
@@ -527,6 +555,23 @@ class WebviewPlusPlatformView(
             return
         }
         ViewCompat.setOnApplyWindowInsetsListener(webView) { view, insets ->
+            val imeInsets = insets.getInsets(WindowInsetsCompat.Type.ime())
+            // --- CORRECTIF #4 ------------------------------------------
+            // Si l'inset IME est déjà nul, on laisse passer l'objet
+            // `insets` tel quel plutôt que d'en reconstruire un et de le
+            // redispatcher via `ViewCompat.onApplyWindowInsets`. Ce
+            // redispatch remonte jusqu'à la `FlutterView` hôte, qui
+            // renvoie alors les métriques de viewport au moteur
+            // (`FlutterJNI: Sending viewport metrics to the engine`) —
+            // coûteux si ça arrive à chaque interaction tactile (focus,
+            // changement de sélection Chromium, etc. redispatchent des
+            // insets même quand le clavier n'est pas concerné), et c'est
+            // précisément ce qui provoque un délai perçu entre le doigt
+            // et le rendu. On ne fait le travail que quand il y a
+            // réellement un inset IME à neutraliser.
+            if (imeInsets == Insets.NONE) {
+                return@setOnApplyWindowInsetsListener insets
+            }
             val stripped = WindowInsetsCompat.Builder(insets)
                 .setInsets(WindowInsetsCompat.Type.ime(), Insets.NONE)
                 .build()
