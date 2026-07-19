@@ -19,6 +19,21 @@ import android.webkit.WebViewClient
 import androidx.core.graphics.Insets
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
+// --- CORRECTIF #1 -----------------------------------------------------
+// API native "document-start" (AndroidX WebKit). Contrairement à
+// `evaluateJavascript` appelé depuis `onPageStarted`, cette API garantit
+// l'exécution du script AVANT le premier script/paint de la page, quelle
+// que soit la vitesse de chargement (cas des pages locales file:// qui
+// peuvent peindre avant qu'un `evaluateJavascript` asynchrone n'ait eu la
+// main). Nécessite androidx.webkit:webkit >= 1.4.0 et WebView >= 106 côté
+// device ; on vérifie via `WebViewFeature.isFeatureSupported` et on garde
+// l'ancien mécanisme (`injectBridgeScript` + evaluateJavascript) comme
+// filet de sécurité sur les appareils plus anciens.
+import androidx.webkit.WebSettingsCompat
+import androidx.webkit.WebViewCompat
+import androidx.webkit.WebViewFeature
+import android.webkit.CookieManager
+import android.webkit.ValueCallback
 import io.flutter.plugin.common.BinaryMessenger
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
@@ -79,10 +94,32 @@ class WebviewPlusPlatformView(
     private var selectionCssColor: String? = null
     private var disabledDefaultContextMenuItems: Set<String> = emptySet()
 
+    // CSS brut fourni via `WebviewWidget(initialCss: ...)` côté Dart,
+    // réinjecté à chaque chargement de page (voir `injectBridgeScript`).
+    private var initialCss: String? = null
+
+    // --- CORRECTIF #2 -------------------------------------------------
+    // Mémorisé pour pouvoir être consulté depuis `onPageFinished` (voir
+    // plus bas) : on ne doit PAS repasser en LAYER_TYPE_HARDWARE quand le
+    // fond est transparent, car `setBackgroundColor(Color.TRANSPARENT)`
+    // ne se compose fiablement (avec alpha) que sur un layer SOFTWARE sur
+    // une bonne partie des versions/GPU Android. Forcer le hardware layer
+    // dans ce cas provoque un flash noir (frame opaque sans alpha) juste
+    // après le chargement de la page.
+    private var isTransparentBackground = false
+
     // Scripts `initialUserScripts` (voir webview_plus_user_script.dart),
     // partitionnés par moment d'injection.
     private var userScriptsAtStart: List<String> = emptyList()
     private var userScriptsAtEnd: List<String> = emptyList()
+
+    // --- CORRECTIF #1 (suite) ------------------------------------------
+    // `true` si `userScriptsAtStart` a pu être injecté nativement via
+    // `WebViewCompat.addDocumentStartJavaScript`. Dans ce cas on NE DOIT
+    // PAS le réexécuter dans `injectBridgeScript` (qui reste utilisé pour
+    // le pont `window.webview_plus` et le CSS de sélection), sous peine
+    // de double-exécution des scripts utilisateur au document-start.
+    private var documentStartScriptsInjectedNatively = false
 
     // -- Éléments personnalisés du menu de sélection (`ContextMenuItem`) ---
     // Liste de (id, name) ; seule la correspondance id -> callback Dart est
@@ -95,6 +132,7 @@ class WebviewPlusPlatformView(
 
         @Suppress("UNCHECKED_CAST")
         val settings = creationParams?.get("initialSettings") as? Map<String, Any?>
+        initialCss = creationParams?.get("initialCss") as? String
         setupWebview(context, settings)
 
         @Suppress("UNCHECKED_CAST")
@@ -107,12 +145,27 @@ class WebviewPlusPlatformView(
         val initialAsset = creationParams?.get("initialAsset") as? String
         val initialUrl = creationParams?.get("initialUrl") as? String
         val initialFile = creationParams?.get("initialFile") as? String
+        @Suppress("UNCHECKED_CAST")
+        val initialData = creationParams?.get("initialData") as? Map<String, Any?>
         when {
             initialAsset != null -> loadFlutterAsset(initialAsset)
             initialFile != null -> loadFile(initialFile)
             initialUrl != null -> webView.loadUrl(initialUrl)
+            initialData != null -> loadInitialData(initialData)
             else -> {}
         }
+    }
+
+    /// Charge le contenu initial fourni via `WebviewWidget(initialData: ...)`
+    /// (voir `WebviewInitialData` côté Dart). Équivalent, à la création, de
+    /// l'appel `loadData` exposé après coup sur le canal par-instance.
+    private fun loadInitialData(data: Map<String, Any?>) {
+        val content = data["data"] as? String ?: return
+        val mimeType = data["mimeType"] as? String ?: "text/html"
+        val encoding = data["encoding"] as? String ?: "utf8"
+        val baseUrl = data["baseUrl"] as? String
+        val historyUrl = data["androidHistoryUrl"] as? String
+        webView.loadDataWithBaseURL(baseUrl, content, mimeType, encoding, historyUrl)
     }
 
     private fun parseContextMenuItems(raw: List<Map<String, Any?>>): List<Pair<String, String>> {
@@ -138,6 +191,25 @@ class WebviewPlusPlatformView(
         webView.isNestedScrollingEnabled = true
 
         applySettings(settings)
+
+        // --- CORRECTIF #1 (suite) --------------------------------------
+        // Injecte `userScriptsAtStart` (ex : le script de sync de thème
+        // Dart) via la vraie API document-start si le device la supporte.
+        // Doit être fait APRES `applySettings` (qui remplit
+        // `userScriptsAtStart`) et AVANT tout `loadUrl`/`loadFile` déclenché
+        // plus bas dans `init {}`.
+        if (userScriptsAtStart.isNotEmpty() &&
+            WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)
+        ) {
+            userScriptsAtStart.forEach { source ->
+                WebViewCompat.addDocumentStartJavaScript(
+                    webView,
+                    "(function(){ $source })();",
+                    setOf("*")
+                )
+            }
+            documentStartScriptsInjectedNatively = true
+        }
 
         webView.setOnFocusChangeListener { _, hasFocus ->
             mainHandler.post {
@@ -229,7 +301,15 @@ class WebviewPlusPlatformView(
             }
 
             override fun onPageFinished(view: WebView, url: String) {
-                webView.setLayerType(View.LAYER_TYPE_HARDWARE, null)
+                // --- CORRECTIF #2 --------------------------------------
+                // Ne repasse en hardware layer que si le fond n'est PAS
+                // transparent : c'est cette combinaison précise
+                // (setBackgroundColor(TRANSPARENT) + LAYER_TYPE_HARDWARE)
+                // qui casse la composition de l'alpha et provoque un
+                // flash noir juste après le chargement de la page.
+                if (!isTransparentBackground) {
+                    webView.setLayerType(View.LAYER_TYPE_HARDWARE, null)
+                }
                 mainHandler.post { channel.invokeMethod("onLoadStop", url) }
             }
 
@@ -298,9 +378,38 @@ class WebviewPlusPlatformView(
         s.useWideViewPort = (settings?.get("useWideViewPort") as? Boolean) ?: true
         s.loadWithOverviewMode = (settings?.get("loadWithOverviewMode") as? Boolean) ?: true
 
+        // -- Gestion du WebviewContentMode (Desktop / Mobile / Recommended) --
+        val contentMode = settings?.get("webviewContentMode") as? String
+        when (contentMode) {
+            "desktop" -> {
+                // Modifie l'User-Agent pour se faire passer pour un ordinateur de bureau (Chrome sur Linux)
+                val desktopUserAgent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                s.userAgentString = desktopUserAgent
+                s.useWideViewPort = true
+                s.loadWithOverviewMode = true
+            }
+            "mobile" -> {
+                // Force le comportement Mobile standard en réinitialisant l'User-Agent par défaut
+                s.userAgentString = WebSettings.getDefaultUserAgent(webView.context)
+                s.useWideViewPort = false
+                s.loadWithOverviewMode = false
+            }
+            else -> {
+                // Mode "recommended" ou par défaut : on utilise ce qui a été défini par les paramètres individuels
+                s.useWideViewPort = (settings?.get("useWideViewPort") as? Boolean) ?: true
+                s.loadWithOverviewMode = (settings?.get("loadWithOverviewMode") as? Boolean) ?: true
+                (settings?.get("userAgent") as? String)?.let { s.userAgentString = it }
+            }
+        }
+
         (settings?.get("userAgent") as? String)?.let { s.userAgentString = it }
 
-        if ((settings?.get("transparentBackground") as? Boolean) == true) {
+        // --- CORRECTIF #2 (suite) --------------------------------------
+        // On mémorise l'état dans `isTransparentBackground` (propriété de
+        // classe) au lieu d'une simple variable locale, pour pouvoir le
+        // relire depuis `onPageFinished`.
+        isTransparentBackground = (settings?.get("transparentBackground") as? Boolean) == true
+        if (isTransparentBackground) {
             webView.setBackgroundColor(Color.TRANSPARENT)
         }
 
@@ -339,6 +448,70 @@ class WebviewPlusPlatformView(
 
         val disableKeyboardResize = (settings?.get("disableKeyboardResize") as? Boolean) ?: false
         applyKeyboardResizeSetting(disableKeyboardResize)
+
+        // -- Nouveaux réglages génériques ------------------------------------
+
+        val incognito = (settings?.get("incognito") as? Boolean) ?: false
+        val cacheEnabled = (settings?.get("cacheEnabled") as? Boolean) ?: true
+        s.cacheMode = when {
+            incognito -> WebSettings.LOAD_NO_CACHE
+            cacheEnabled -> WebSettings.LOAD_DEFAULT
+            else -> WebSettings.LOAD_NO_CACHE
+        }
+        s.domStorageEnabled = s.domStorageEnabled && !incognito
+
+        (settings?.get("applicationNameForUserAgent") as? String)?.let { appName ->
+            if (appName.isNotEmpty()) {
+                s.userAgentString = "${s.userAgentString} $appName"
+            }
+        }
+
+        (settings?.get("textZoom") as? Int)?.let { s.textZoom = it }
+
+        (settings?.get("minimumFontSize") as? Int)?.let { s.minimumFontSize = it }
+
+        (settings?.get("initialScale") as? Int)?.let { webView.setInitialScale(it) }
+
+        val thirdPartyCookies = (settings?.get("thirdPartyCookiesEnabled") as? Boolean) ?: true
+        CookieManager.getInstance().setAcceptThirdPartyCookies(webView, thirdPartyCookies)
+
+        s.setGeolocationEnabled((settings?.get("geolocationEnabled") as? Boolean) ?: false)
+
+        s.javaScriptCanOpenWindowsAutomatically =
+            (settings?.get("javaScriptCanOpenWindowsAutomatically") as? Boolean) ?: false
+
+        if (WebViewFeature.isFeatureSupported(WebViewFeature.SAFE_BROWSING_ENABLE)) {
+            WebSettingsCompat.setSafeBrowsingEnabled(
+                s, (settings?.get("safeBrowsingEnabled") as? Boolean) ?: true)
+        }
+
+        s.mixedContentMode = if ((settings?.get("allowMixedContent") as? Boolean) == true) {
+            WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+        } else {
+            WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+        }
+
+        if (WebViewFeature.isFeatureSupported(WebViewFeature.FORCE_DARK)) {
+            @Suppress("DEPRECATION")
+            WebSettingsCompat.setForceDark(
+                s,
+                if ((settings?.get("forceDarkMode") as? Boolean) == true) {
+                    WebSettingsCompat.FORCE_DARK_ON
+                } else {
+                    WebSettingsCompat.FORCE_DARK_OFF
+                }
+            )
+        }
+
+        webView.overScrollMode = when (settings?.get("overScrollMode") as? String) {
+            "always" -> View.OVER_SCROLL_ALWAYS
+            "never" -> View.OVER_SCROLL_NEVER
+            else -> View.OVER_SCROLL_IF_CONTENT_SCROLLS
+        }
+
+        val hideNativeScrollbars = (settings?.get("hideNativeScrollbars") as? Boolean) ?: false
+        webView.isVerticalScrollBarEnabled = !hideNativeScrollbars
+        webView.isHorizontalScrollBarEnabled = !hideNativeScrollbars
     }
 
     /// Empêche la WebView de réagir au changement de hauteur de l'inset IME
@@ -468,9 +641,28 @@ class WebviewPlusPlatformView(
             """.trimIndent()
         } ?: ""
 
-        // `initialUserScripts` en atDocumentStart : exécutés immédiatement,
-        // avant même le reste de ce script de pont.
-        val startUserScripts = userScriptsAtStart.joinToString("\n") { "(function(){ $it })();" }
+        // `initialCss` (voir `WebviewWidget.initialCss` côté Dart) : réinjecté
+        // à chaque chargement de page, au même titre que le CSS de sélection.
+        val initialCssInjection = initialCss?.takeIf { it.isNotEmpty() }?.let { css ->
+            """
+            var __fwInitialCssStyle = document.createElement('style');
+            __fwInitialCssStyle.id = '__fw_initial_css';
+            __fwInitialCssStyle.appendChild(document.createTextNode(${JSONObject.quote(css)}));
+            (document.head || document.documentElement).appendChild(__fwInitialCssStyle);
+            """.trimIndent()
+        } ?: ""
+
+        // --- CORRECTIF #1 (suite) --------------------------------------
+        // Si `userScriptsAtStart` a déjà été injecté nativement via
+        // `WebViewCompat.addDocumentStartJavaScript` (voir `setupWebview`),
+        // on NE LE RÉINJECTE PAS ici pour éviter une double exécution.
+        // On ne garde ce fallback `evaluateJavascript` que pour les
+        // appareils ne supportant pas l'API native.
+        val startUserScripts = if (documentStartScriptsInjectedNatively) {
+            ""
+        } else {
+            userScriptsAtStart.joinToString("\n") { "(function(){ $it })();" }
+        }
 
         // `initialUserScripts` en atDocumentEnd : exécutés juste après
         // DOMContentLoaded, avant la notification `onDOMContentLoaded` de
@@ -497,6 +689,7 @@ class WebviewPlusPlatformView(
 
               function __fwNotifyDomContentLoaded() {
                 $cssInjection
+                $initialCssInjection
                 $endUserScripts
                 $fontsReadyScript
                 if (window.WebviewPlusDomContentLoaded) {
@@ -607,6 +800,27 @@ class WebviewPlusPlatformView(
               l.type = 'text/css';
               l.href = ${JSONObject.quote(url)};
               (document.head || document.documentElement).appendChild(l);
+            })();
+        """.trimIndent()
+        webView.evaluateJavascript(js, null)
+    }
+
+    /// Injecte du code JavaScript brut directement dans la page en cours
+    /// (voir `WebviewPlusController.injectJsData` côté Dart).
+    private fun injectJsData(jsData: String) {
+        webView.evaluateJavascript(jsData, null)
+    }
+
+    /// Injecte du CSS brut directement dans la page en cours, via une
+    /// balise `<style>` ajoutée à la volée (voir
+    /// `WebviewPlusController.injectCssData` côté Dart).
+    private fun injectCssData(cssData: String) {
+        val js = """
+            (function() {
+              var s = document.createElement('style');
+              s.type = 'text/css';
+              s.appendChild(document.createTextNode(${JSONObject.quote(cssData)}));
+              (document.head || document.documentElement).appendChild(s);
             })();
         """.trimIndent()
         webView.evaluateJavascript(js, null)
@@ -725,6 +939,24 @@ class WebviewPlusPlatformView(
                             result.success(value)
                         }
                     }
+                }
+            }
+            "injectJsData" -> {
+                val jsData = call.argument<String>("jsData")
+                if (jsData != null) {
+                    injectJsData(jsData)
+                    result.success(null)
+                } else {
+                    result.error("INVALID_ARGUMENT", "jsData manquant", null)
+                }
+            }
+            "injectCssData" -> {
+                val cssData = call.argument<String>("cssData")
+                if (cssData != null) {
+                    injectCssData(cssData)
+                    result.success(null)
+                } else {
+                    result.error("INVALID_ARGUMENT", "cssData manquant", null)
                 }
             }
             "injectJavascriptFileFromUrl" -> {

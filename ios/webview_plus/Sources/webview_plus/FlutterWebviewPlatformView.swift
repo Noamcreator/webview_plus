@@ -16,6 +16,33 @@ class WebviewPlusPlatformView: NSObject, FlutterPlatformView {
     private let channel: FlutterMethodChannel
     private let viewId: Int64
 
+    // -- Registre global des instances vivantes ------------------------------
+    //
+    // Utilisé uniquement par `WebviewPlusController.setWebContentsDebuggingEnabled`
+    // (voir `WebviewPlusPlugin.swift`, canal `plugins.noam.me/webview_plus_info`),
+    // qui doit pouvoir basculer `isInspectable` sur toutes les instances déjà
+    // créées (et mémoriser la valeur pour les prochaines). Références
+    // faibles : une entrée disparaît d'elle-même si `dispose()` n'a pas
+    // encore été appelé mais que l'instance a déjà été libérée.
+    private static let liveInstances = NSHashTable<WebviewPlusPlatformView>.weakObjects()
+    // `false` par défaut, à l'image du comportement natif iOS
+    // (`WKWebView.isInspectable` est désactivé tant qu'on ne l'active pas
+    // explicitement) — à la différence de WebView2 sur Windows, dont les
+    // DevTools sont accessibles par défaut.
+    private static var webContentsDebuggingEnabled = false
+
+    static func setWebContentsDebuggingEnabled(_ enabled: Bool) {
+        webContentsDebuggingEnabled = enabled
+        if #available(iOS 16.4, *) {
+            for instance in liveInstances.allObjects {
+                instance.webView.isInspectable = enabled
+            }
+        }
+        // Sur iOS < 16.4, `isInspectable` n'existe pas : la valeur mémorisée
+        // ci-dessus n'aura d'effet qu'au travers de `WebviewSettings.isInspectable`
+        // posé explicitement à la création de chaque webview.
+    }
+
     // -- Réglages dérivés de `initialSettings` ------------------------------
     private var disableContextMenu = false
     private var disableLongPressLinks = false
@@ -49,16 +76,46 @@ class WebviewPlusPlatformView: NSObject, FlutterPlatformView {
         configuration.preferences.javaScriptEnabled =
             (settings?["javaScriptEnabled"] as? Bool) ?? true
 
+        configuration.preferences.javaScriptCanOpenWindowsAutomatically =
+            (settings?["javaScriptCanOpenWindowsAutomatically"] as? Bool) ?? false
+
+        // Lecture vidéo "inline" plutôt qu'en plein écran forcé, et prise en
+        // charge du "picture in picture". Doivent être posés avant la
+        // construction du `WKWebView` (propriétés figées à l'initialisation).
+        configuration.allowsInlineMediaPlayback =
+            (settings?["allowsInlineMediaPlayback"] as? Bool) ?? true
+        configuration.allowsPictureInPictureMediaPlayback =
+            (settings?["allowsPictureInPicture"] as? Bool) ?? true
+
         // Pas de désactivation directe du DOM storage sur WKWebView ; on
         // utilise un websiteDataStore non-persistant en approximation quand
-        // `domStorageEnabled == false` (données en mémoire, effacées à la
-        // destruction de la vue).
-        if (settings?["domStorageEnabled"] as? Bool) == false {
+        // `domStorageEnabled == false` ou `incognito == true` (données en
+        // mémoire, effacées à la destruction de la vue).
+        let incognito = (settings?["incognito"] as? Bool) ?? false
+        if (settings?["domStorageEnabled"] as? Bool) == false || incognito {
             configuration.websiteDataStore = .nonPersistent()
+        }
+
+        // Accès `file://` élargi (voir `WebviewSettings.allowFileAccessFromFileURLs`
+        // / `.allowUniversalAccessFromFileURLs` côté Dart) : sans ça, une
+        // page chargée depuis le disque ne peut pas récupérer d'autres
+        // fichiers locaux via `fetch`/XHR (cause fréquente d'un fichier
+        // local qui "ne s'ouvre pas").
+        let allowFileAccessFromFileURLs =
+            (settings?["allowFileAccessFromFileURLs"] as? Bool) ?? false
+        let allowUniversalAccessFromFileURLs =
+            (settings?["allowUniversalAccessFromFileURLs"] as? Bool) ?? false
+        if allowFileAccessFromFileURLs || allowUniversalAccessFromFileURLs {
+            configuration.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
+        }
+        if allowUniversalAccessFromFileURLs {
+            configuration.setValue(true, forKey: "allowUniversalAccessFromFileURLs")
         }
 
         self.webView = ConfigurableWKWebView(frame: frame, configuration: configuration)
         super.init()
+
+        Self.liveInstances.add(self)
 
         webView.disabledActions = []
 
@@ -75,7 +132,7 @@ class WebviewPlusPlatformView: NSObject, FlutterPlatformView {
         applySettings(settings)
 
         userContentController.addUserScript(WKUserScript(
-            source: bridgeScript(),
+            source: bridgeScript(initialCss: creationParams?["initialCss"] as? String),
             injectionTime: .atDocumentStart,
             forMainFrameOnly: false
         ))
@@ -101,6 +158,7 @@ class WebviewPlusPlatformView: NSObject, FlutterPlatformView {
         let initialAsset = creationParams?["initialAsset"] as? String
         let initialUrl = creationParams?["initialUrl"] as? String
         let initialFile = creationParams?["initialFile"] as? String
+        let initialData = creationParams?["initialData"] as? [String: Any?]
         if let initialAsset = initialAsset {
             loadFlutterAsset(initialAsset)
         } else if let initialFile = initialFile {
@@ -108,10 +166,32 @@ class WebviewPlusPlatformView: NSObject, FlutterPlatformView {
         } else if let initialUrl = initialUrl, let url = URL(string: initialUrl) {
             isNavigatingInternally = true
             webView.load(URLRequest(url: url))
+        } else if let initialData = initialData {
+            loadInitialData(initialData)
         }
     }
 
+    /// Charge le contenu initial fourni via `WebviewWidget(initialData: ...)`
+    /// (voir `WebviewInitialData` côté Dart).
+    private func loadInitialData(_ data: [String: Any?]) {
+        guard let content = data["data"] as? String else { return }
+        let mimeType = (data["mimeType"] as? String) ?? "text/html"
+        let encodingName = (data["encoding"] as? String) ?? "utf8"
+        let baseUrl = (data["baseUrl"] as? String).flatMap { URL(string: $0) } ?? URL(string: "about:blank")!
+        isNavigatingInternally = true
+        webView.load(
+            content.data(using: .utf8) ?? Data(),
+            mimeType: mimeType,
+            characterEncodingName: encodingName,
+            baseURL: baseUrl
+        )
+    }
+
     func view() -> UIView { webView }
+
+    func dispose() {
+        Self.liveInstances.remove(self)
+    }
 
     private static func parseContextMenuItems(_ raw: [[String: Any]]) -> [(id: String, name: String)] {
         return raw.compactMap { entry in
@@ -156,10 +236,12 @@ class WebviewPlusPlatformView: NSObject, FlutterPlatformView {
             webView.customUserAgent = userAgent
         }
 
-        if (settings?["isInspectable"] as? Bool) == true {
-            if #available(iOS 16.4, *) {
-                webView.isInspectable = true
-            }
+        if #available(iOS 16.4, *) {
+            // `setWebContentsDebuggingEnabled` (global) sert de valeur par
+            // défaut ; `isInspectable` (par instance) peut l'outrepasser
+            // explicitement à `true`.
+            webView.isInspectable =
+                Self.webContentsDebuggingEnabled || (settings?["isInspectable"] as? Bool) == true
         }
 
         if (settings?["supportZoom"] as? Bool) == false {
@@ -198,6 +280,20 @@ class WebviewPlusPlatformView: NSObject, FlutterPlatformView {
         if let textColorValue = settings?["selectionHandleColor"] as? Int {
             selectionTextCssColor = argbToCssRgba(textColorValue)
         }
+
+        webView.scrollView.bounces = (settings?["bounces"] as? Bool) ?? true
+
+        let hideNativeScrollbars = (settings?["hideNativeScrollbars"] as? Bool) ?? false
+        webView.scrollView.showsVerticalScrollIndicator = !hideNativeScrollbars
+        webView.scrollView.showsHorizontalScrollIndicator = !hideNativeScrollbars
+
+        if let appName = settings?["applicationNameForUserAgent"] as? String, !appName.isEmpty {
+            webView.configuration.applicationNameForUserAgent = appName
+        }
+
+        if #available(iOS 14.5, *), let minSize = settings?["minimumFontSize"] as? Int {
+            webView.configuration.preferences.minimumFontSize = CGFloat(minSize)
+        }
     }
 
     private func argbToCssRgba(_ argb: Int) -> String {
@@ -214,7 +310,7 @@ class WebviewPlusPlatformView: NSObject, FlutterPlatformView {
     /// `window.webview_plus.callHandler(...)` (pont vers
     /// `addJavaScriptHandler` côté Dart) et `window.WebviewPlusChannel`
     /// (pont vers `onMessageReceived`), plus le CSS de sélection éventuel.
-    private func bridgeScript() -> String {
+    private func bridgeScript(initialCss: String?) -> String {
         let cssBlock: String
         if selectionCssColor != nil || selectionTextCssColor != nil {
             let backgroundRule = selectionCssColor.map { "background:\($0);" } ?? ""
@@ -227,10 +323,23 @@ class WebviewPlusPlatformView: NSObject, FlutterPlatformView {
             cssBlock = ""
         }
 
+        // `initialCss` (voir `WebviewWidget.initialCss` côté Dart) : injecté à
+        // chaque chargement de page, au même titre que le CSS de sélection.
+        let initialCssBlock: String
+        if let initialCss = initialCss, !initialCss.isEmpty {
+            initialCssBlock = "document.addEventListener('DOMContentLoaded',function(){" +
+                "var ist=document.createElement('style');ist.id='__fw_initial_css';" +
+                "ist.appendChild(document.createTextNode(\(JsonLiteral.encode(initialCss))));" +
+                "(document.head||document.documentElement).appendChild(ist);});"
+        } else {
+            initialCssBlock = ""
+        }
+
         return """
         (function(){
           if (window.webview_plus) return;
           \(cssBlock)
+          \(initialCssBlock)
 
           function __fwNotifyDomContentLoaded() {
             window.webkit.messageHandlers.WebviewPlusDomContentLoaded.postMessage(window.location.href);
@@ -354,6 +463,22 @@ class WebviewPlusPlatformView: NSObject, FlutterPlatformView {
         webView.evaluateJavaScript(js, completionHandler: nil)
     }
 
+    /// Injecte du code JavaScript brut directement dans la page en cours
+    /// (voir `WebviewPlusController.injectJsData` côté Dart).
+    private func injectJsData(_ jsData: String) {
+        webView.evaluateJavaScript(jsData, completionHandler: nil)
+    }
+
+    /// Injecte du CSS brut directement dans la page en cours, via une
+    /// balise `<style>` ajoutée à la volée (voir
+    /// `WebviewPlusController.injectCssData` côté Dart).
+    private func injectCssData(_ cssData: String) {
+        let js = "(function(){var s=document.createElement('style');s.type='text/css';" +
+            "s.appendChild(document.createTextNode(\(JsonLiteral.encode(cssData))));" +
+            "(document.head||document.documentElement).appendChild(s);})();"
+        webView.evaluateJavaScript(js, completionHandler: nil)
+    }
+
     private func assetUrl(_ assetPath: String) -> String {
         let key = FlutterDartProject.lookupKey(forAsset: assetPath)
         if let path = Bundle.main.path(forResource: key, ofType: nil) {
@@ -441,6 +566,22 @@ class WebviewPlusPlatformView: NSObject, FlutterPlatformView {
             webView.evaluateJavaScript("document.documentElement.outerHTML") { value, _ in
                 result(value as? String)
             }
+
+        case "injectJsData":
+            guard let args = call.arguments as? [String: Any], let jsData = args["jsData"] as? String else {
+                result(FlutterError(code: "INVALID_ARGUMENT", message: "jsData manquant", details: nil))
+                return
+            }
+            injectJsData(jsData)
+            result(nil)
+
+        case "injectCssData":
+            guard let args = call.arguments as? [String: Any], let cssData = args["cssData"] as? String else {
+                result(FlutterError(code: "INVALID_ARGUMENT", message: "cssData manquant", details: nil))
+                return
+            }
+            injectCssData(cssData)
+            result(nil)
 
         case "injectJavascriptFileFromUrl":
             guard let args = call.arguments as? [String: Any], let url = args["url"] as? String else {

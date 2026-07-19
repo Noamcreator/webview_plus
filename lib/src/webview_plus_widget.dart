@@ -6,11 +6,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:webview_plus/src/webview_plus_environment.dart';
+import 'package:webview_plus/src/webview_plus_desktop_scrollbar_theme.dart';
 import 'webview_plus_context_menu.dart';
 import 'webview_plus_controller.dart';
+import 'webview_plus_initial_data.dart';
 import 'webview_plus_settings.dart';
-import 'webview_plus_web.dart'
-    if (dart.library.io) 'webview_plus_web_stub.dart' as web_impl;
+import 'webview_plus_web.dart' if (dart.library.io) 'webview_plus_web_stub.dart' as web_impl;
 
 const String _kViewType = 'plugins.noam.me/webview_plus';
 
@@ -28,6 +29,8 @@ class WebviewWidget extends StatefulWidget {
     this.initialUrl,
     this.initialAsset,
     this.initialFile,
+    this.initialData,
+    this.initialCss,
     this.initialSettings = const WebviewSettings(),
     this.onWebViewCreated,
     this.onNavigationRequest,
@@ -44,10 +47,11 @@ class WebviewWidget extends StatefulWidget {
   }) : assert(
           (initialUrl != null ? 1 : 0) +
                   (initialAsset != null ? 1 : 0) +
-                  (initialFile != null ? 1 : 0) <=
+                  (initialFile != null ? 1 : 0) +
+                  (initialData != null ? 1 : 0) <=
               1,
           'Un seul type de source initiale peut être fourni parmi '
-          'initialUrl, initialAsset et initialFile.',
+          'initialUrl, initialAsset, initialFile et initialData.',
         );
 
   final Set<Factory<OneSequenceGestureRecognizer>>? gestureRecognizers;
@@ -56,6 +60,18 @@ class WebviewWidget extends StatefulWidget {
   final String? initialUrl;
   final String? initialAsset;
   final String? initialFile;
+
+  /// Contenu initial (HTML/données) chargé directement à la création de la
+  /// Webview, sans passer par une URL/un asset/un fichier. Voir
+  /// [WebviewInitialData]. Mutuellement exclusif avec [initialUrl],
+  /// [initialAsset] et [initialFile].
+  final WebviewInitialData? initialData;
+
+  /// CSS brut injecté à chaque chargement de page (initial ou suite à une
+  /// navigation), sur les 5 plateformes (Android, iOS, macOS, Windows,
+  /// Linux). Pour une injection ponctuelle après coup, voir plutôt
+  /// `WebviewPlusController.injectCssData`.
+  final String? initialCss;
   final WebviewSettings initialSettings;
   final WebviewCreatedCallback? onWebViewCreated;
   final NavigationRequestCallback? onNavigationRequest;
@@ -135,6 +151,7 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
   MouseCursor _windowsCursor = SystemMouseCursors.basic;
 
   int? _linuxViewId;
+  bool _linuxInitScheduled = false;
   bool _linuxCreated = false;
   Rect _linuxLastRect = Rect.zero;
   bool _linuxLastVisible = false;
@@ -142,16 +159,152 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
   final GlobalKey _windowsWidgetKey = GlobalKey();
   final Map<int, int> _downButtons = <int, int>{};
 
+  // `true` dès que la création Windows a été lancée une première fois (voir
+  // `didChangeDependencies`, qui a besoin du `Theme` ambiant pour résoudre
+  // les couleurs de scrollbar en mode `auto` et ne peut donc pas se faire 
+  // dans `initState`, où `context` n'a pas encore ses dépendances).
+  bool _windowsInitScheduled = false;
+
+  // Cache de la vue Web (HtmlElementView + iframe), construite une seule
+  // fois par instance de State. Indispensable : `build()` peut être
+  // ré-exécuté à tout moment par Flutter (rebuild du parent, setState,
+  // hot reload...), or `web_impl.buildWebview` enregistre un NOUVEAU
+  // `viewType` et une NOUVELLE iframe à chaque appel. Sans ce cache,
+  // chaque rebuild recrée une vue plateforme, ce qui recrée le
+  // contrôleur, redéclenche `onWebViewCreated`, et peut ainsi provoquer
+  // une recréation en boucle infinie si l'appelant réagit à ce callback
+  // par un `setState`.
+  Widget? _webViewWidget;
+
   @override
   void initState() {
     super.initState();
+    assert(() {
+      return true;
+    }());
     WidgetsBinding.instance.addObserver(this);
-    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.windows) {
-      _initWindowsWebview();
-    } else if (!kIsWeb && defaultTargetPlatform == TargetPlatform.linux) {
-      _initLinuxWebview();
-    } else if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
+    // Important : on ne lance PAS _initLinuxWebview() ici. Comme pour
+    // Windows, cette méthode appelle _resolveWindowsScrollbarTheme(), qui
+    // peut faire Theme.of(context) en mode `auto`. Tant que initState() n'a
+    // pas terminé, l'élément n'a pas encore ses InheritedWidget dépendances
+    // enregistrées, ce qui plante avec
+    // "dependOnInheritedWidgetOfExactType<_InheritedTheme>() ... called
+    // before initState() completed". On délègue donc entièrement le
+    // déclenchement à didChangeDependencies(), qui s'exécute après.
+    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
       _loadAndroidSdkInt();
+    }
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (kIsWeb) return;
+
+    if (defaultTargetPlatform == TargetPlatform.windows) {
+      if (!_windowsInitScheduled) {
+        _windowsInitScheduled = true;
+        _initWindowsWebview();
+      } else if (_windowsReady) {
+        _pushWindowsScrollbarTheme();
+      }
+    } 
+    else if (defaultTargetPlatform == TargetPlatform.linux) {
+      if (!_linuxInitScheduled) {
+        _linuxInitScheduled = true;
+        _initLinuxWebview();
+      }
+    }
+  }
+
+  /// Calcule la configuration de thème des barres de défilement à envoyer
+  /// au plugin natif Windows, à partir de [WebviewSettings.windowsScrollbarThemeMode].
+  /// En mode `auto`, dérive les couleurs du `Theme` Flutter ambiant.
+  Map<String, dynamic>? _resolveDesktopScrollbarTheme() {
+    final settings = widget.initialSettings;
+    final scrollbarTheme = settings.windowsScrollbarTheme; // Utilisation de l'objet encapsulé
+
+    if (settings.hideNativeScrollbars) {
+      return const <String, dynamic>{'mode': 'hidden'};
+    }
+
+    switch (scrollbarTheme.themeMode) {
+      case DesktopScrollbarThemeMode.hidden:
+        return const <String, dynamic>{'mode': 'hidden'};
+
+      case DesktopScrollbarThemeMode.custom:
+        return <String, dynamic>{
+          'mode': 'custom',
+          'trackColor': scrollbarTheme.trackColor?.toARGB32(),
+          'thumbColor': scrollbarTheme.thumbColor?.toARGB32(),
+          'thumbHoverColor': scrollbarTheme.thumbHoverColor?.toARGB32(),
+          'width': scrollbarTheme.width,
+        };
+
+      case DesktopScrollbarThemeMode.light:
+        return _desktopScrollbarColorsFor(Brightness.light, scrollbarTheme);
+
+      case DesktopScrollbarThemeMode.dark:
+        return _desktopScrollbarColorsFor(Brightness.dark, scrollbarTheme);
+
+      case DesktopScrollbarThemeMode.auto:
+        final theme = Theme.of(context);
+        return _desktopScrollbarColorsFor(
+          theme.brightness,
+          scrollbarTheme,
+          colorScheme: theme.colorScheme,
+        );
+    }
+  }
+
+  /// Dérive une palette de scrollbar pour une [brightness] donnée, en
+  /// s'appuyant sur le [colorScheme] Flutter fourni (mode `auto`) ou sur des
+  /// couleurs par défaut sobres (modes `light`/`dark` fixes).
+  Map<String, dynamic> _desktopScrollbarColorsFor(
+    Brightness brightness,
+    DesktopScrollbarTheme scrollbarTheme, {
+    ColorScheme? colorScheme,
+  }) {
+    final bool isDark = brightness == Brightness.dark;
+    
+    final Color track = colorScheme?.surface ??
+        (isDark ? const Color(0xFF1E1E1E) : const Color(0xFFF0F0F0));
+        
+    final Color thumb = colorScheme != null
+        ? colorScheme.onSurface.withValues(alpha: 0.4)
+        : (isDark ? const Color(0x66FFFFFF) : const Color(0x66000000));
+        
+    final Color thumbHover = colorScheme?.primary ??
+        (isDark ? const Color(0xFF9E9E9E) : const Color(0xFF757575));
+        
+    return <String, dynamic>{
+      'mode': isDark ? 'dark' : 'light',
+      'trackColor': track.toARGB32(),
+      'thumbColor': thumb.toARGB32(),
+      'thumbHoverColor': thumbHover.toARGB32(),
+      'width': scrollbarTheme.width, // Récupéré depuis le nouveau thème
+    };
+  }
+
+  /// Republie la configuration courante des barres de défilement au plugin
+  /// natif Windows (mise à jour à chaud, ex. changement de thème). No-op
+  /// tant que la vue Windows n'a pas encore été créée.
+  void _pushWindowsScrollbarTheme() {
+    final id = _windowsViewId;
+    if (id == null) return;
+    _globalWindowsChannel.invokeMethod('setScrollbarTheme', {
+      'viewId': id,
+      'scrollbarTheme': _resolveDesktopScrollbarTheme(),
+    });
+  }
+
+  @override
+  void didUpdateWidget(covariant WebviewWidget oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!kIsWeb &&
+        defaultTargetPlatform == TargetPlatform.windows &&
+        oldWidget.initialSettings != widget.initialSettings) {
+      _pushWindowsScrollbarTheme();
     }
   }
 
@@ -211,15 +364,18 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
         'initialUrl': widget.initialUrl,
         'initialAsset': widget.initialAsset,
         'initialFile': widget.initialFile,
+        'initialData': widget.initialData?.toMap(),
+        'initialCss': widget.initialCss,
         'initialSettings': widget.initialSettings.toMap(),
         'userDataFolder': widget.webViewEnvironment?.settings?.userDataFolder,
+        'scrollbarTheme': _resolveDesktopScrollbarTheme(),
       });
 
       final Map<dynamic, dynamic> response =
           Map<dynamic, dynamic>.from(result as Map);
       final textureId = response['textureId'] as int?;
 
-      final controller = WebviewPlusController.init(
+      final controller = WebviewBaseController.init(
         id,
         onNavigationRequest: widget.onNavigationRequest,
         onMessageReceived: widget.onMessageReceived,
@@ -268,12 +424,17 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
         'initialUrl': widget.initialUrl,
         'initialAsset': widget.initialAsset,
         'initialFile': widget.initialFile,
+        'initialData': widget.initialData?.toMap(),
+        'initialCss': widget.initialCss,
         'initialSettings': widget.initialSettings.toMap(),
+        // WebKitGTK respecte les mêmes pseudo-éléments `::-webkit-scrollbar*`
+        // que Windows/macOS : on réutilise donc la même résolution de thème.
+        'scrollbarTheme': _resolveDesktopScrollbarTheme(),
       });
 
       if (!mounted) return;
 
-      final controller = WebviewPlusController.init(
+      final controller = WebviewBaseController.init(
         id,
         onNavigationRequest: widget.onNavigationRequest,
         onMessageReceived: widget.onMessageReceived,
@@ -495,15 +656,25 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
     final Color backgroundColor = widget.initialSettings.initialBackgroundColor ?? Colors.transparent;
 
     if (kIsWeb) {
+      // Construit la vue une seule fois : voir le commentaire sur
+      // `_webViewWidget` plus haut. Les callbacks (onMessageReceived,
+      // onNavigationRequest...) restent lus dynamiquement à travers les
+      // closures ci-dessous à chaque appel, donc leurs mises à jour
+      // éventuelles (nouveau `widget` après un `didUpdateWidget`) sont
+      // bien prises en compte sans reconstruire l'iframe.
+      _webViewWidget ??= web_impl.buildWebview(
+        initialUrl: widget.initialUrl,
+        initialAsset: widget.initialAsset,
+        initialData: widget.initialData,
+        onMessageReceived: (controller, message) =>
+            widget.onMessageReceived?.call(controller, message),
+        onNavigationRequest: (controller, uri) =>
+            widget.onNavigationRequest?.call(controller, uri) ?? true,
+        onControllerCreated: _handleControllerCreated,
+      );
       return Container(
         color: backgroundColor,
-        child: web_impl.buildWebview(
-          initialUrl: widget.initialUrl,
-          initialAsset: widget.initialAsset,
-          onMessageReceived: widget.onMessageReceived,
-          onNavigationRequest: widget.onNavigationRequest,
-          onControllerCreated: _handleControllerCreated,
-        ),
+        child: _webViewWidget,
       );
     }
 
@@ -515,7 +686,10 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
       'initialUrl': widget.initialUrl,
       'initialAsset': widget.initialAsset,
       'initialFile': widget.initialFile,
+      'initialData': widget.initialData?.toMap(),
+      'initialCss': widget.initialCss,
       'initialSettings': widget.initialSettings.toMap(),
+      'scrollbarTheme': _resolveDesktopScrollbarTheme(),
       if (supportsContextMenuItems) 'contextMenuItems': widget.contextMenuItems.map((e) => e.toMap()).toList(),
     };
 
@@ -659,7 +833,7 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
 
   void _onPlatformViewCreated(int id) {
     final bool supportsContextMenuItems = !kIsWeb && (defaultTargetPlatform == TargetPlatform.android || defaultTargetPlatform == TargetPlatform.iOS);
-    final controller = WebviewPlusController.init(
+    final controller = WebviewBaseController.init(
       id,
       onNavigationRequest: widget.onNavigationRequest,
       onMessageReceived: widget.onMessageReceived,
@@ -673,10 +847,14 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
     _handleControllerCreated(controller);
   }
 
-  void _handleControllerCreated(WebviewPlatformController controller) {
-    if (controller is WebviewPlusController) {
-      widget.onWebViewCreated?.call(controller);
-    }
+  void _handleControllerCreated(WebviewPlusController controller) {
+    // `controller` est un `WebviewPlusController` natif sur
+    // Android/iOS/macOS/Windows/Linux, ou un `WebviewPlusWebController` sur
+    // Web (voir `webview_plus_web.dart`). Les deux implémentent
+    // [WebviewPlusController], type désormais accepté par
+    // [WebviewCreatedCallback] : pas de filtrage par type ici, sous peine de
+    // ne jamais notifier l'hôte côté Web.
+    widget.onWebViewCreated?.call(controller);
   }
 
   @override

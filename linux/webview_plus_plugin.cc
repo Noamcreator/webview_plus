@@ -6,6 +6,14 @@
 
 #include <cstring>
 
+#ifndef WEBKIT_CONTEXT_MENU_ACTION_PRINT
+#ifdef WEBKIT_CONTEXT_MENU_ACTION_PRINT_FRAME
+#define WEBKIT_CONTEXT_MENU_ACTION_PRINT WEBKIT_CONTEXT_MENU_ACTION_PRINT_FRAME
+#else
+#define WEBKIT_CONTEXT_MENU_ACTION_PRINT 9999 // Valeur fallback si absente
+#endif
+#endif
+
 #include "webview_plus_plugin_private.h"
 
 #define webview_plus_PLUGIN(obj) \

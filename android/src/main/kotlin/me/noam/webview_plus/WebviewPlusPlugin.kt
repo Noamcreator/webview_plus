@@ -63,6 +63,53 @@ class WebviewPlusPlugin : FlutterPlugin, ActivityAware {
                         result.success(null)
                     }
                 }
+                // -- WebviewCacheManager (voir webview_plus_controller.dart) --
+                //
+                // `WebView` n'expose `clearCache`/`clearHistory`/`clearFormData`
+                // qu'en tant que méthodes d'instance : on en crée une jetable,
+                // le temps de l'appel, plutôt que d'exiger qu'une Webview soit
+                // déjà affichée (contrairement à Windows, voir `g_default_profile`
+                // côté C++).
+                "clearCache" -> {
+                    if (ctx == null) {
+                        result.error("NO_CONTEXT", "Plugin non attaché", null)
+                    } else {
+                        val tmp = WebView(ctx)
+                        tmp.clearCache(true)
+                        tmp.destroy()
+                        result.success(null)
+                    }
+                }
+                "clearCookies" -> {
+                    val cookieManager = android.webkit.CookieManager.getInstance()
+                    cookieManager.removeAllCookies(null)
+                    cookieManager.flush()
+                    result.success(null)
+                }
+                "clearAllData" -> {
+                    if (ctx == null) {
+                        result.error("NO_CONTEXT", "Plugin non attaché", null)
+                    } else {
+                        val tmp = WebView(ctx)
+                        tmp.clearCache(true)
+                        tmp.clearHistory()
+                        tmp.clearFormData()
+                        tmp.destroy()
+                        val cookieManager = android.webkit.CookieManager.getInstance()
+                        cookieManager.removeAllCookies(null)
+                        cookieManager.flush()
+                        android.webkit.WebStorage.getInstance().deleteAllData()
+                        result.success(null)
+                    }
+                }
+                // Voir `WebviewPlusController.setWebContentsDebuggingEnabled` côté
+                // Dart : API Android native, globale et immédiate, à la
+                // différence de `WebviewSettings.isInspectable` (par instance).
+                "setWebContentsDebuggingEnabled" -> {
+                    val enabled = call.argument<Boolean>("enabled") ?: true
+                    WebView.setWebContentsDebuggingEnabled(enabled)
+                    result.success(null)
+                }
                 else -> result.notImplemented()
             }
         }

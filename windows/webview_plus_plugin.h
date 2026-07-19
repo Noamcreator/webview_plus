@@ -66,14 +66,17 @@ struct VirtualKeyState {
 class WebViewPlusInstance {
  public:
   WebViewPlusInstance(flutter::PluginRegistrarWindows* registrar,
-                         WebviewPlatform* platform, HWND message_hwnd,
-                         int64_t view_id, const std::string& initial_url,
-                         const std::string& initial_asset,
-                         const std::string& initial_file,
-                         const flutter::EncodableMap& initial_settings,
-                         const std::string& user_data_folder,
-                         std::function<void(int64_t texture_id)> on_ready,
-                         std::function<void(const std::string&)> on_error);
+                      WebviewPlatform* platform, HWND message_hwnd,
+                      int64_t view_id, const std::string& initial_url,
+                      const std::string& initial_asset,
+                      const std::string& initial_file,
+                      const flutter::EncodableMap& initial_settings,
+                      const std::string& user_data_folder,
+                      const flutter::EncodableMap& initial_data,
+                      const flutter::EncodableMap& scrollbar_theme,
+                      const std::string& initial_css,
+                      std::function<void(int64_t texture_id)> on_ready,
+                      std::function<void(const std::string&)> on_error);
   ~WebViewPlusInstance();
 
   int64_t texture_id() const { return texture_id_; }
@@ -85,12 +88,26 @@ class WebViewPlusInstance {
   void GetHtml(std::function<void(std::wstring)> callback);
   void InjectScriptFromUrl(const std::wstring& url);
   void InjectCssFromUrl(const std::wstring& url);
+
+  // Injection brute (voir `WebviewPlusController.injectJsData` /
+  // `.injectCssData` côté Dart), par opposition à `InjectScriptFromUrl` /
+  // `InjectCssFromUrl` qui chargent une ressource distante.
+  void InjectJsData(const std::wstring& js_data);
+  void InjectCssData(const std::wstring& css_data);
+
+  // Bascule les DevTools WebView2 pour cette instance (voir
+  // `WebviewPlusController.setWebContentsDebuggingEnabled` côté Dart).
+  void SetDevToolsEnabled(bool enabled);
   void EvaluateJavaScript(const std::wstring& code,
                           std::function<void(std::wstring)> callback);
   void SetSize(double width, double height, double scale_factor);
   void SetCursorPos(double x, double y);
   void SetPointerButtonState(int button, bool is_down);
   void SetScrollDelta(double dx, double dy);
+  
+  // Gestion du thème des barres de défilement (scrollbar)
+  void SetScrollbarTheme(const flutter::EncodableMap& theme);
+  void ApplyScrollbarThemeLive();
 
   // Doit être appelé chaque fois que la fenêtre native top-level qui
   // héberge cette instance change de position à l'écran (WM_MOVE /
@@ -108,6 +125,9 @@ class WebViewPlusInstance {
   void InjectBridgeScript();
   void HandleWebMessage(const std::wstring& raw);
   void SendScroll(double delta, bool horizontal);
+  
+  // Génère le CSS injecté pour appliquer dynamiquement le thème de la scrollbar
+  std::wstring BuildScrollbarStyleScript() const;
 
   // Traduit un HCURSOR renvoyé par WebView2 (CursorChanged) en un
   // identifiant générique envoyé à Dart, qui le mappe vers un
@@ -134,6 +154,16 @@ class WebViewPlusInstance {
   std::string initial_file_;
   std::string user_data_folder_;
   flutter::EncodableMap initial_settings_;
+  
+  // Nouveaux membres pour la persistance des données et le thème des barres de défilement
+  flutter::EncodableMap initial_data_;
+  flutter::EncodableMap scrollbar_theme_;
+  std::wstring scrollbar_css_script_;
+
+  // `initialCss` (voir `WebviewWidget.initialCss` côté Dart) : réinjecté à
+  // chaque navigation, au même titre que le CSS de sélection (voir
+  // `InjectBridgeScript`).
+  std::wstring initial_css_;
 
   bool is_navigating_internally_ = false;
   bool disable_context_menu_ = false;

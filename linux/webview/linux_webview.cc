@@ -9,11 +9,6 @@ namespace {
 
 constexpr const gchar *kInstanceKey = "webview_plus_instance";
 
-LinuxWebview *webview_from_object(gpointer object) {
-  return static_cast<LinuxWebview *>(
-      g_object_get_data(G_OBJECT(object), kInstanceKey));
-}
-
 // Encode n'importe quelle FlValue en JSON via le codec JSON intégré à
 // flutter_linux : bien plus fiable qu'une sérialisation manuelle, et
 // utilisé aussi bien pour encoder les réponses natif -> JS que pour
@@ -180,7 +175,7 @@ static void navigation_request_finished_cb(GObject *object,
   g_object_unref(decision);
 }
 
-static gboolean decide_policy_cb(WebKitWebview *widget,
+static gboolean decide_policy_cb(WebKitWebView *widget,
                                  WebKitPolicyDecision *decision,
                                  WebKitPolicyDecisionType type,
                                  gpointer user_data) {
@@ -235,7 +230,7 @@ static gboolean decide_policy_cb(WebKitWebview *widget,
   return TRUE;
 }
 
-static void load_changed_cb(WebKitWebview *widget, WebKitLoadEvent load_event,
+static void load_changed_cb(WebKitWebView *widget, WebKitLoadEvent load_event,
                             gpointer user_data) {
   LinuxWebview *webview = static_cast<LinuxWebview *>(user_data);
   const gchar *uri = webkit_web_view_get_uri(widget);
@@ -263,7 +258,7 @@ static void emit_load_error(LinuxWebview *webview, GError *error,
   invoke_method(webview, "onReceivedError", args);
 }
 
-static gboolean load_failed_cb(WebKitWebview *widget,
+static gboolean load_failed_cb(WebKitWebView *widget,
                                WebKitLoadEvent load_event,
                                const gchar *failing_uri, GError *error,
                                gpointer user_data) {
@@ -285,7 +280,7 @@ static gboolean load_failed_cb(WebKitWebview *widget,
 // desktop, le clic droit ouvre le menu contextuel classique du navigateur
 // (pas une barre de sélection tactile), donc ce plugin se contente ici de
 // masquer entièrement le menu ou de bloquer les liens, comme avant.
-static gboolean context_menu_cb(WebKitWebview *web_view,
+static gboolean context_menu_cb(WebKitWebView *web_view,
                                 WebKitContextMenu *context_menu,
                                 GdkEvent *event,
                                 WebKitHitTestResult *hit_test_result,
@@ -303,10 +298,12 @@ static gboolean context_menu_cb(WebKitWebview *web_view,
     for (int i = webkit_context_menu_get_n_items(context_menu) - 1; i >= 0; --i) {
       WebKitContextMenuItem *item =
           webkit_context_menu_get_item_at_position(context_menu, i);
-      if (item != nullptr &&
-          webkit_context_menu_item_get_stock_action(item) ==
-              WEBKIT_CONTEXT_MENU_ACTION_PRINT) {
-        webkit_context_menu_remove(context_menu, item);
+          
+    if (item != nullptr) {
+        GAction* action = webkit_context_menu_item_get_gaction(item);
+        if (action != nullptr && g_strcmp0(g_action_get_name(action), "print") == 0) {
+          webkit_context_menu_remove(context_menu, item);
+        }
       }
     }
   }
@@ -321,7 +318,7 @@ static gboolean context_menu_cb(WebKitWebview *web_view,
 // pages, ou par l'entrée "Imprimer" du menu contextuel, déjà filtrée
 // ci-dessus) qui émet le signal "print". Le bloquer ici couvre donc les
 // deux cas sans dépendre d'une capture clavier fragile au niveau widget.
-static gboolean print_requested_cb(WebKitWebview *web_view,
+static gboolean print_requested_cb(WebKitWebView *web_view,
                                    WebKitPrintOperation *print_operation,
                                    gpointer user_data) {
   LinuxWebview *webview = static_cast<LinuxWebview *>(user_data);
@@ -346,6 +343,105 @@ gchar *argb_to_css_rgba(gint64 argb) {
 
 }  // namespace
 
+// `false` par défaut, à l'image du comportement natif WebKitGTK
+// (`enable-developer-extras` est désactivé tant qu'on ne l'active pas
+// explicitement) — à la différence de WebView2 sur Windows, dont les
+// DevTools sont accessibles par défaut. Voir
+// `WebviewPlusController.setWebContentsDebuggingEnabled` côté Dart.
+gboolean g_web_contents_debugging_enabled = FALSE;
+
+// Bascule les DevTools WebKitGTK pour une instance déjà créée. [webview_ptr]
+// est un `gpointer` brut (et non un `LinuxWebview*`) afin que
+// `webview_plus_plugin.cc`, qui n'a connaissance que de `gpointer` au
+// travers de son `GHashTable`, puisse l'appeler sans dépendre de la
+// définition complète de `LinuxWebview` (privée à `webview_internal.h`).
+extern "C" void set_dev_tools_enabled_for_linux_webview(gpointer webview_ptr,
+                                                         gboolean enabled) {
+  auto *webview = static_cast<LinuxWebview *>(webview_ptr);
+  if (webview == nullptr || webview->web_view == nullptr) {
+    return;
+  }
+  WebKitSettings *webkit_settings = webkit_web_view_get_settings(webview->web_view);
+  webkit_settings_set_enable_developer_extras(webkit_settings, enabled);
+}
+
+// -- CSS initial (`initialCss` côté Dart) ---------------------------------
+//
+// Injecté à chaque navigation via un `WebKitUserScript` dédié (par
+// opposition au CSS de sélection, embarqué directement dans
+// `apply_bridge_script`), pour ne pas avoir à modifier la signature de ce
+// dernier (déclarée dans `webview/webview_internal.h`).
+void apply_initial_css_script(LinuxWebview *webview, const gchar *initial_css) {
+  if (initial_css == nullptr || *initial_css == '\0') {
+    return;
+  }
+  g_autofree gchar *css_literal = json_encode_string(initial_css);
+  g_autofree gchar *script = g_strdup_printf(
+      "document.addEventListener('DOMContentLoaded',function(){"
+      "var ist=document.createElement('style');ist.id='__fw_initial_css';"
+      "ist.appendChild(document.createTextNode(%s));"
+      "(document.head||document.documentElement).appendChild(ist);});",
+      css_literal);
+  WebKitUserScript *user_script = webkit_user_script_new(
+      script, WEBKIT_USER_CONTENT_INJECT_TOP_FRAME,
+      WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_START, nullptr, nullptr);
+  webkit_user_content_manager_add_script(webview->content_manager, user_script);
+  webkit_user_script_unref(user_script);
+}
+
+// -- Thème des barres de défilement (couleur) -----------------------------
+//
+// Réutilise le même format `scrollbarTheme` que Windows (voir
+// `WebViewPlusInstance::SetScrollbarTheme` côté C++ / `_resolveWindowsScrollbarTheme`
+// côté Dart) : WebKitGTK (comme WebView2 en mode composition) respecte les
+// pseudo-éléments `::-webkit-scrollbar*`, ce qui permet de partager
+// exactement la même logique de couleurs entre les deux plateformes.
+gchar *build_scrollbar_css(FlValue *theme) {
+  const gchar *mode = theme != nullptr ? map_lookup_string(theme, "mode") : nullptr;
+  if (mode != nullptr && strcmp(mode, "hidden") == 0) {
+    return g_strdup("::-webkit-scrollbar{display:none;}html{scrollbar-width:none;}");
+  }
+
+  const gdouble width = theme != nullptr ? map_lookup_double(theme, "width", 12.0) : 12.0;
+  g_autofree gchar *track =
+      theme != nullptr ? argb_to_css_rgba(map_lookup_int(theme, "trackColor", 0)) : nullptr;
+  g_autofree gchar *thumb =
+      theme != nullptr ? argb_to_css_rgba(map_lookup_int(theme, "thumbColor", 0)) : nullptr;
+  g_autofree gchar *thumb_hover =
+      theme != nullptr ? argb_to_css_rgba(map_lookup_int(theme, "thumbHoverColor", 0)) : nullptr;
+
+  return g_strdup_printf(
+      "::-webkit-scrollbar{width:%.0fpx;height:%.0fpx;}"
+      "::-webkit-scrollbar-track{background:%s;}"
+      "::-webkit-scrollbar-thumb{background:%s;border-radius:8px;}"
+      "::-webkit-scrollbar-thumb:hover{background:%s;}"
+      "html{scrollbar-width:auto;}",
+      width, width, track != nullptr ? track : "#f0f0f0",
+      thumb != nullptr ? thumb : "rgba(0,0,0,0.4)",
+      thumb_hover != nullptr ? thumb_hover : "#757575");
+}
+
+// Applique [theme] (peut être `nullptr`, auquel cas rien n'est injecté et
+// les barres système par défaut restent utilisées) sous forme de
+// `WebKitUserScript` persistant, appliqué à chaque navigation.
+void apply_scrollbar_theme_script(LinuxWebview *webview, FlValue *theme) {
+  if (theme == nullptr || fl_value_get_type(theme) != FL_VALUE_TYPE_MAP) {
+    return;
+  }
+  g_autofree gchar *css = build_scrollbar_css(theme);
+  g_autofree gchar *css_literal = json_encode_string(css);
+  g_autofree gchar *script = g_strdup_printf(
+      "(function(){var el=document.getElementById('__fw_scrollbar_style');"
+      "if(!el){el=document.createElement('style');el.id='__fw_scrollbar_style';"
+      "(document.head||document.documentElement).appendChild(el);}"
+      "el.innerHTML=%s;})();",
+      css_literal);
+  WebKitUserScript *user_script = webkit_user_script_new(
+      script, WEBKIT_USER_CONTENT_INJECT_TOP_FRAME,
+      WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_START, nullptr, nullptr);
+  webkit_user_content_manager_add_script(webview->content_manager, user_script);
+  webkit_user_script_unref(user_script);
+}
 
 // -- Assets Flutter -------------------------------------------------------
 
@@ -516,7 +612,7 @@ void destroy_linux_webview(gpointer data) {
     // `gtk_widget_destroy` détache le widget de son parent (l'overlay) et
     // libère la référence que le conteneur détenait ; celle prise via
     // `g_object_ref_sink` à la création (voir `create_linux_webview`)
-    // doit être relâchée séparément ici, sans quoi le WebKitWebview ne
+    // doit être relâchée séparément ici, sans quoi le WebKitWebView ne
     // serait jamais finalisé.
     gtk_widget_destroy(GTK_WIDGET(webview->web_view));
     g_object_unref(webview->web_view);
@@ -524,6 +620,7 @@ void destroy_linux_webview(gpointer data) {
   g_clear_object(&webview->channel);
   g_clear_object(&webview->content_manager);
   g_free(webview->selection_css_color);
+  g_free(webview->selection_text_css_color);
   g_free(webview);
 }
 
@@ -558,7 +655,12 @@ LinuxWebview *create_linux_webview(WebviewPlusPlugin *self, gint64 view_id,
   if (const gchar *user_agent = map_lookup_string(settings, "userAgent")) {
     webkit_settings_set_user_agent(webkit_settings, user_agent);
   }
-  if (map_lookup_bool(settings, "isInspectable", FALSE)) {
+  if (map_lookup_bool(settings, "isInspectable", FALSE) ||
+      g_web_contents_debugging_enabled) {
+    // `setWebContentsDebuggingEnabled` (global, voir
+    // `g_web_contents_debugging_enabled` et `set_dev_tools_enabled_for_linux_webview`
+    // ci-dessus) sert de valeur par défaut ; `isInspectable` (par instance)
+    // peut l'outrepasser explicitement à `TRUE`.
     webkit_settings_set_enable_developer_extras(webkit_settings, TRUE);
   }
 
@@ -583,8 +685,41 @@ LinuxWebview *create_linux_webview(WebviewPlusPlugin *self, gint64 view_id,
         g_strdup_printf("rgba(%d,%d,%d,%.3f)", r, g, b, a / 255.0);
   }
 
-  apply_bridge_script(webview, webview->selection_css_color);
+  gint64 selection_text_color = map_lookup_int(settings, "selectionTextColor", 0);
+  if (selection_text_color != 0) {
+    const gint a = (selection_text_color >> 24) & 0xFF;
+    const gint r = (selection_text_color >> 16) & 0xFF;
+    const gint g = (selection_text_color >> 8) & 0xFF;
+    const gint b = selection_text_color & 0xFF;
+    webview->selection_text_css_color = g_strdup_printf("rgba(%d,%d,%d,%.3f)", r, g, b, a / 255.0);
+  }
+
+  apply_bridge_script(webview, webview->selection_css_color, webview->selection_text_css_color);
   apply_user_scripts(webview, settings);
+
+  // `initialCss` (voir `WebviewWidget.initialCss` côté Dart) : clé de premier
+  // niveau des `creation_params`, comme `initialAsset`/`initialUrl`.
+  apply_initial_css_script(webview, map_lookup_string(creation_params, "initialCss"));
+
+  // Thème des barres de défilement (couleur) : voir
+  // `WebviewWidget._resolveWindowsScrollbarTheme` côté Dart, réutilisé tel
+  // quel pour Linux (comme pour macOS).
+  apply_scrollbar_theme_script(webview, map_lookup(creation_params, "scrollbarTheme"));
+
+  // `hideNativeScrollbars` : masque les barres de défilement WebKitGTK sans
+  // affecter la possibilité de défiler (clavier/molette/tactile).
+  if (map_lookup_bool(settings, "hideNativeScrollbars", FALSE)) {
+    const gchar *scrollbar_css_script =
+        "(function(){var st=document.createElement('style');"
+        "st.innerHTML='::-webkit-scrollbar{display:none;}html{scrollbar-width:none;}';"
+        "(document.head||document.documentElement).appendChild(st);})();";
+    WebKitUserScript *scrollbar_script = webkit_user_script_new(
+        scrollbar_css_script, WEBKIT_USER_CONTENT_INJECT_TOP_FRAME,
+        WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_START, nullptr, nullptr);
+    webkit_user_content_manager_add_script(webview->content_manager,
+                                            scrollbar_script);
+    webkit_user_script_unref(scrollbar_script);
+  }
 
   webkit_user_content_manager_register_script_message_handler(
       webview->content_manager, "WebviewPlusChannel");
@@ -648,6 +783,15 @@ LinuxWebview *create_linux_webview(WebviewPlusPlugin *self, gint64 view_id,
     }
   } else if (initial_url != nullptr) {
     begin_navigation(webview, initial_url);
+  } else {
+    FlValue *initial_data = map_lookup(creation_params, "initialData");
+    const gchar *data_content =
+        initial_data != nullptr ? map_lookup_string(initial_data, "data") : nullptr;
+    if (data_content != nullptr) {
+      const gchar *base_url = map_lookup_string(initial_data, "baseUrl");
+      webview->is_navigating_internally = TRUE;
+      webkit_web_view_load_html(webview->web_view, data_content, base_url);
+    }
   }
 
   gint64 *key = g_new(gint64, 1);

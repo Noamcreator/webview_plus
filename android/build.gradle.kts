@@ -72,6 +72,5 @@ kotlin {
 }
 
 dependencies {
-    testImplementation("org.jetbrains.kotlin:kotlin-test")
-    testImplementation("org.mockito:mockito-core:5.0.0")
+    implementation("androidx.webkit:webkit:1.16.0")
 }

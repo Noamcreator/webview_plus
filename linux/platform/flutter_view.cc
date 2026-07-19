@@ -2,7 +2,7 @@
 
 // GTK (Linux) ne propose pas d'équivalent aux `PlatformView` texturées
 // utilisées côté Android/iOS/macOS/Windows : on superpose donc chaque
-// `WebKitWebview` en tant qu'enfant "overlay" d'un `GtkOverlay` réutilisant
+// `WebKitWebView` en tant qu'enfant "overlay" d'un `GtkOverlay` réutilisant
 // la vue Flutter existante, positionné/dimensionné explicitement depuis
 // Dart via `setFrame` (voir `lib/src/webview_plus_widget.dart`, branche
 // Linux, et `webview/linux_webview.cc`).

@@ -27,7 +27,7 @@ struct _WebviewPlusPlugin {
 // -- Instance de Webview -------------------------------------------------
 //
 // Une entrée par Webview créée depuis Dart. Porte son propre
-// `WebKitWebview`, son propre `FlMethodChannel` (`webview_plus_$viewId`,
+// `WebKitWebView`, son propre `FlMethodChannel` (`webview_plus_$viewId`,
 // même convention de nommage qu'Android/iOS/macOS) et l'état nécessaire au
 // pont JS <-> Dart ainsi qu'au menu contextuel.
 typedef struct {
@@ -35,7 +35,7 @@ typedef struct {
   gint64 view_id;
 
   WebKitUserContentManager *content_manager;
-  WebKitWebview *web_view;
+  WebKitWebView *web_view;
   FlMethodChannel *channel;
 
   gint frame_x;
@@ -47,6 +47,7 @@ typedef struct {
   gboolean disable_context_menu;
   gboolean disable_long_press_links;
   gchar *selection_css_color;  // ex: "rgba(255,0,0,0.4)", nullable
+  gchar *selection_text_css_color;
   gboolean disable_printing;
 
   // Empêche de renvoyer `onNavigationRequest` pour les navigations

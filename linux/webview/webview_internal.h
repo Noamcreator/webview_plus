@@ -4,9 +4,9 @@
 #include "webview_plus_plugin_private.h"
 
 // linux_webview.cc
-void apply_bridge_script(LinuxWebview *webview, const gchar *selection_css);
-void begin_navigation(LinuxWebview *webview, const gchar *uri);
+void apply_bridge_script(LinuxWebview *webview, const gchar *selection_css, const gchar *selection_text_css);
 gchar *asset_uri(const gchar *asset_path);
+void begin_navigation(LinuxWebview *webview, const gchar *uri); // <-- AJOUTER CETTE LIGNE
 
 // webview_method_handler.cc
 void handle_instance_method_call(LinuxWebview *webview,

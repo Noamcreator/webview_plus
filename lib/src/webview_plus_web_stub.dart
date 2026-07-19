@@ -1,5 +1,6 @@
 import 'package:flutter/widgets.dart';
 import 'webview_plus_controller.dart';
+import 'webview_plus_initial_data.dart';
 
 /// Stub utilisé sur Android/iOS/macOS/Windows/Linux : cette fonction
 /// n'est jamais appelée en pratique (le widget bascule sur les
@@ -8,9 +9,10 @@ import 'webview_plus_controller.dart';
 Widget buildWebview({
   required String? initialUrl,
   required String? initialAsset,
+  WebviewInitialData? initialData,
   required WebviewMessageCallback? onMessageReceived,
   required NavigationRequestCallback? onNavigationRequest,
-  required void Function(WebviewPlatformController controller)
+  required void Function(WebviewPlusController controller)
       onControllerCreated,
 }) {
   throw UnsupportedError(

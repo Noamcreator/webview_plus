@@ -243,7 +243,7 @@ packages:
       sha256: "949a932224383300f01be9221c39180316445ecb8e7547f70a41a35bf421fb9e"
       url: "https://pub.dev"
     source: hosted
-    version: "0.7.11"
+    version: "0.8.0"
   vector_math:
     dependency: transitive
     description:
@@ -282,7 +282,7 @@ packages:
       path: ".."
       relative: true
     source: path
-    version: "0.7.1"
+    version: "0.8.0"
 sdks:
   dart: ">=3.12.2 <4.0.0"
   flutter: ">=3.18.0-18.0.pre.54"

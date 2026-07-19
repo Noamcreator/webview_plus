@@ -342,6 +342,18 @@ bool g_message_window_class_registered = false;
 WNDCLASSW g_message_window_class = {};
 std::map<int64_t, std::unique_ptr<WebViewPlusInstance>> g_instances;
 
+// Profil WebView2 par défaut, capturé dès qu'une première instance obtient
+// son `ICoreWebView2` (voir `init_controller` dans `InitializeWebView2`) et
+// conservé au-delà de la durée de vie de cette instance. Sert de socle à
+// `WebviewCacheManager` (voir `plugins.noam.me/webview_plus_info` plus bas),
+// qui n'a sinon aucun moyen d'obtenir un profil sans Webview déjà créée.
+Microsoft::WRL::ComPtr<ICoreWebView2Profile2> g_default_profile;
+
+// Valeur mémorisée par `WebviewPlusController.setWebContentsDebuggingEnabled`
+// (voir le canal `plugins.noam.me/webview_plus_info`), appliquée à toutes
+// les instances déjà créées et à celles créées par la suite.
+bool g_web_contents_debugging_enabled = true;
+
 bool EnsurePlatform() {
   if (!g_platform) {
     g_platform = std::make_unique<WebviewPlatform>();
@@ -407,12 +419,22 @@ void EnsureWindowSubclassed(HWND top_level_hwnd) {
 
 }  // namespace
 
+// NOTE: nécessite d'ajouter au header de la classe (`webview_plus_plugin.h`) :
+//   flutter::EncodableMap initial_data_;
+//   flutter::EncodableMap scrollbar_theme_;
+//   std::wstring scrollbar_css_script_;
+//   void SetScrollbarTheme(const flutter::EncodableMap& theme);
+//   void ApplyScrollbarThemeLive();
+//   std::wstring BuildScrollbarStyleScript() const;
 WebViewPlusInstance::WebViewPlusInstance(
     flutter::PluginRegistrarWindows* registrar, WebviewPlatform* platform,
     HWND message_hwnd, int64_t view_id, const std::string& initial_url,
     const std::string& initial_asset, const std::string& initial_file,
     const flutter::EncodableMap& initial_settings,
     const std::string& user_data_folder,
+    const flutter::EncodableMap& initial_data,
+    const flutter::EncodableMap& scrollbar_theme,
+    const std::string& initial_css,
     std::function<void(int64_t texture_id)> on_ready,
     std::function<void(const std::string&)> on_error)
     : message_hwnd_(message_hwnd),
@@ -422,6 +444,9 @@ WebViewPlusInstance::WebViewPlusInstance(
       initial_file_(initial_file),
       initial_settings_(initial_settings),
       user_data_folder_(user_data_folder),
+      initial_data_(initial_data),
+      scrollbar_theme_(scrollbar_theme),
+      initial_css_(Utf8ToWide(initial_css)),
       on_ready_(std::move(on_ready)),
       on_error_(std::move(on_error)),
       registrar_(registrar),
@@ -490,6 +515,18 @@ WebViewPlusInstance::WebViewPlusInstance(
             (*shared_result)->Success(EncodableValue(WideToUtf8(html)));
           });
           return;
+        } else if (method == "injectJsData" && args) {
+          auto it = args->find(EncodableValue("jsData"));
+          if (it != args->end()) {
+            InjectJsData(Utf8ToWide(std::get<std::string>(it->second)));
+          }
+          result->Success();
+        } else if (method == "injectCssData" && args) {
+          auto it = args->find(EncodableValue("cssData"));
+          if (it != args->end()) {
+            InjectCssData(Utf8ToWide(std::get<std::string>(it->second)));
+          }
+          result->Success();
         } else if (method == "injectJavascriptFileFromUrl" && args) {
           auto it = args->find(EncodableValue("url"));
           if (it != args->end()) {
@@ -664,6 +701,22 @@ void WebViewPlusInstance::InitializeWebView2() {
                 return S_OK;
               }
 
+              // Capture le profil par défaut (voir `g_default_profile`) dès
+              // la première instance qui en obtient un, pour le compte de
+              // `WebviewCacheManager`.
+              if (!g_default_profile) {
+                Microsoft::WRL::ComPtr<ICoreWebView2_13> webview13;
+                if (SUCCEEDED(webview_.As(&webview13)) && webview13) {
+                  Microsoft::WRL::ComPtr<ICoreWebView2Profile> profile;
+                  if (SUCCEEDED(webview13->get_Profile(&profile)) && profile) {
+                    profile.As(&g_default_profile);
+                  }
+                }
+              }
+              // Applique la dernière valeur connue de
+              // `setWebContentsDebuggingEnabled` à cette nouvelle instance.
+              SetDevToolsEnabled(g_web_contents_debugging_enabled);
+
               COREWEBVIEW2_COLOR transparent{0, 0, 0, 0};
               controller_->put_DefaultBackgroundColor(transparent);
 
@@ -758,6 +811,7 @@ void WebViewPlusInstance::InitializeWebView2() {
               RegisterTexture();
 
               ApplySettings(initial_settings_);
+              SetScrollbarTheme(scrollbar_theme_);
 
               EventRegistrationToken token;
               webview_->add_WebMessageReceived(
@@ -922,6 +976,15 @@ void WebViewPlusInstance::InitializeWebView2() {
               } else if (!initial_url_.empty()) {
                 is_navigating_internally_ = true;
                 webview_->Navigate(Utf8ToWide(initial_url_).c_str());
+              } else if (!initial_data_.empty()) {
+                // ⚠️ WebView2 ne propose pas d'équivalent à
+                // `loadDataWithBaseURL`/`loadHTMLString(baseURL:)` : le
+                // `baseUrl` de `WebviewInitialData` est ignoré ici (voir la
+                // documentation Dart de `WebviewInitialData.baseUrl`).
+                const auto* data = FindKey(initial_data_, "data");
+                if (const auto* data_str = data ? std::get_if<std::string>(data) : nullptr) {
+                  LoadHtmlOrData(Utf8ToWide(*data_str));
+                }
               }
 
               if (on_ready_) {
@@ -1023,6 +1086,94 @@ void WebViewPlusInstance::ApplySettings(const EncodableMap& settings) {
   ParseUserScripts(settings, &user_scripts_at_start_, &user_scripts_at_end_);
 }
 
+// Traduit une couleur ARGB (int32/int64) d'un `EncodableMap` en littéral CSS
+// `rgba(...)`, avec une valeur de repli si absente.
+namespace {
+std::wstring ArgbFieldToCssRgba(const EncodableMap& map, const char* key,
+                                const wchar_t* fallback) {
+  const auto* v = FindKey(map, key);
+  if (!v) return fallback;
+  int64_t argb = 0;
+  if (auto v32 = std::get_if<int32_t>(v)) {
+    argb = *v32;
+  } else if (auto v64 = std::get_if<int64_t>(v)) {
+    argb = *v64;
+  } else {
+    return fallback;
+  }
+  int a = static_cast<int>((argb >> 24) & 0xFF);
+  int r = static_cast<int>((argb >> 16) & 0xFF);
+  int g = static_cast<int>((argb >> 8) & 0xFF);
+  int b = static_cast<int>(argb & 0xFF);
+  wchar_t buf[64];
+  swprintf_s(buf, L"rgba(%d,%d,%d,%.3f)", r, g, b, a / 255.0);
+  return buf;
+}
+}  // namespace
+
+// Traduit `scrollbarTheme` (voir `WebviewWidget._resolveWindowsScrollbarTheme`
+// côté Dart) en `scrollbar_css_script_`, un script auto-suffisant qui
+// crée/met à jour une balise `<style>` dédiée. Réutilisé à la fois pour
+// l'injection permanente (`InjectBridgeScript`, exécutée à chaque nouveau
+// document) et pour la mise à jour à chaud (`ApplyScrollbarThemeLive`).
+void WebViewPlusInstance::SetScrollbarTheme(const EncodableMap& theme) {
+  scrollbar_theme_ = theme;
+
+  std::wstring mode = L"light";
+  if (const auto* m = FindKey(theme, "mode")) {
+    if (auto s = std::get_if<std::string>(m)) mode = Utf8ToWide(*s);
+  }
+
+  std::wstring css;
+  if (mode == L"hidden") {
+    css =
+        L"::-webkit-scrollbar{display:none;}"
+        L"html{scrollbar-width:none;}";
+  } else {
+    double width = 12.0;
+    if (const auto* w = FindKey(theme, "width")) width = GetDoubleValue(*w);
+
+    std::wstring track = ArgbFieldToCssRgba(theme, "trackColor", L"#f0f0f0");
+    std::wstring thumb = ArgbFieldToCssRgba(theme, "thumbColor", L"rgba(0,0,0,0.4)");
+    std::wstring thumb_hover =
+        ArgbFieldToCssRgba(theme, "thumbHoverColor", L"#757575");
+
+    wchar_t width_buf[32];
+    swprintf_s(width_buf, L"%.0f", width);
+
+    css =
+        L"::-webkit-scrollbar{width:" + std::wstring(width_buf) +
+        L"px;height:" + std::wstring(width_buf) + L"px;}"
+        L"::-webkit-scrollbar-track{background:" + track + L";}"
+        L"::-webkit-scrollbar-thumb{background:" + thumb +
+        L";border-radius:8px;}"
+        L"::-webkit-scrollbar-thumb:hover{background:" + thumb_hover + L";}"
+        L"html{scrollbar-width:auto;}";
+  }
+
+  scrollbar_css_script_ =
+      L"(function(){"
+      L"var el=document.getElementById('__fw_scrollbar_style');"
+      L"if(!el){el=document.createElement('style');"
+      L"el.id='__fw_scrollbar_style';"
+      L"(document.head||document.documentElement).appendChild(el);}"
+      L"el.innerHTML=" +
+      (L"'" + css + L"';") + L"})();";
+}
+
+std::wstring WebViewPlusInstance::BuildScrollbarStyleScript() const {
+  return scrollbar_css_script_;
+}
+
+// Applique immédiatement le thème courant sur le document déjà chargé (mise
+// à jour à chaud, ex. changement de thème Flutter). L'injection "à chaque
+// navigation" reste assurée par `InjectBridgeScript`
+// (`AddScriptToExecuteOnDocumentCreated`, enregistrée une seule fois).
+void WebViewPlusInstance::ApplyScrollbarThemeLive() {
+  if (!webview_ || scrollbar_css_script_.empty()) return;
+  webview_->ExecuteScript(scrollbar_css_script_.c_str(), nullptr);
+}
+
 void WebViewPlusInstance::InjectBridgeScript() {
   std::wstring css_block;
   if (!selection_css_color_.empty() || !selection_text_css_color_.empty()) {
@@ -1044,6 +1195,18 @@ void WebViewPlusInstance::InjectBridgeScript() {
   std::wstring print_block;
   if (disable_printing_) {
     print_block = L"window.print=function(){};";
+  }
+
+  // `initialCss` (voir `WebviewWidget.initialCss` côté Dart) : réinjecté à
+  // chaque navigation, au même titre que le CSS de sélection ci-dessus.
+  std::wstring initial_css_block;
+  if (!initial_css_.empty()) {
+    initial_css_block =
+        L"document.addEventListener('DOMContentLoaded', function(){"
+        L"var ist=document.createElement('style');ist.id='__fw_initial_css';"
+        L"ist.appendChild(document.createTextNode(\"" +
+        EscapeJsonString(initial_css_) +
+        L"\"));(document.head||document.documentElement).appendChild(ist);});";
   }
 
   // On englobe chaque script utilisateur dans un try-catch pour isoler les erreurs
@@ -1081,7 +1244,7 @@ void WebViewPlusInstance::InjectBridgeScript() {
       L"};"
       L"window.WebViewPlusChannel={postMessage:function(msg){window.chrome.webview.postMessage(msg);}};"
       L"}"
-      + css_block + print_block + 
+      + css_block + initial_css_block + print_block + scrollbar_css_script_ +
       start_user_scripts_block + // Lancés en sécurité après la création du bridge
       end_user_scripts_block +
       L"})();";
@@ -1204,8 +1367,88 @@ std::wstring WebViewPlusInstance::EncodableValueToJsonLiteral(
   return L"null";
 }
 
+std::wstring FormatHtml(const std::wstring& html) {
+  std::wstring formatted;
+  int indent_level = 0;
+  bool in_tag = false;
+  bool in_closing_tag = false;
+  std::wstring current_token;
+
+  auto append_indent = [&formatted](int level) {
+    for (int i = 0; i < level; ++i) {
+      formatted += L"  "; // 2 espaces pour l'indentation (tu peux mettre L"\t" si tu préfères)
+    }
+  };
+
+  for (size_t i = 0; i < html.size(); ++i) {
+    wchar_t c = html[i];
+
+    if (c == L'<') {
+      // Si on a accumulé du texte avant la balise, on l'ajoute en nettoyant les espaces inutiles
+      if (!current_token.empty()) {
+        // Simple trim rapide
+        size_t first = current_token.find_first_not_of(L" \t\r\n ");
+        if (first != std::wstring::npos) {
+          size_t last = current_token.find_last_not_of(L" \t\r\n ");
+          formatted += current_token.substr(first, (last - first + 1));
+        }
+        current_token.clear();
+      }
+
+      in_tag = true;
+      if (i + 1 < html.size() && html[i + 1] == L'/') {
+        in_closing_tag = true;
+        indent_level = (std::max)(0, indent_level - 1);
+      }
+      
+      if (formatted.empty() || formatted.back() != L'\n') {
+        formatted += L"\n";
+      }
+      append_indent(indent_level);
+      formatted += L"<";
+    } 
+    else if (c == L'>') {
+      formatted += L">";
+      in_tag = false;
+
+      // Si ce n'était pas une balise auto-fermante (comme <img />, <br />) et pas une balise de fermeture
+      bool is_self_closing = (i > 0 && html[i - 1] == L'/');
+      if (!in_closing_tag && !is_self_closing) {
+        indent_level++;
+      }
+      in_closing_tag = false;
+      formatted += L"\n";
+    } 
+    else {
+      if (in_tag) {
+        formatted += c;
+      } else {
+        // On accumule le texte (les nœuds texte hors balises)
+        current_token += c;
+      }
+    }
+  }
+
+  // Nettoyage final des sauts de ligne consécutifs vides
+  std::wstring clean_result;
+  bool last_was_newline = false;
+  for (wchar_t c : formatted) {
+    if (c == L'\n') {
+      if (!last_was_newline) {
+        clean_result += c;
+        last_was_newline = true;
+      }
+    } else {
+      clean_result += c;
+      last_was_newline = false;
+    }
+  }
+
+  return clean_result;
+}
+
 std::wstring WebViewPlusInstance::DecodeJsonStringResult(
-    const std::wstring& raw) {
+  const std::wstring& raw) {
   if (raw.empty() || raw == L"null") return L"";
   std::wstring s = raw;
   if (s.size() >= 2 && s.front() == L'"' && s.back() == L'"') {
@@ -1237,6 +1480,19 @@ std::wstring WebViewPlusInstance::DecodeJsonStringResult(
           out += L'\t';
           ++i;
           break;
+        case L'u': { // <-- AJOUT DU SUPPORT UNICODE \uXXXX
+          if (i + 5 < s.size()) {
+            std::wstring hex = s.substr(i + 2, 4);
+            wchar_t code =
+                static_cast<wchar_t>(wcstol(hex.c_str(), nullptr, 16));
+            out += code;
+            i += 5; // Avance de 5 pour consommer 'u' + les 4 chiffres hexa
+          } else {
+            out += next;
+            ++i;
+          }
+          break;
+        }
         default:
           out += s[i];
       }
@@ -1309,11 +1565,16 @@ void WebViewPlusInstance::LoadHtmlOrData(const std::wstring& html) {
 }
 
 void WebViewPlusInstance::GetHtml(
-    std::function<void(std::wstring)> callback) {
-  EvaluateJavaScript(L"document.documentElement.outerHTML",
-                      [callback](std::wstring raw) {
-                        callback(DecodeJsonStringResult(raw));
-                      });
+  std::function<void(std::wstring)> callback) {
+EvaluateJavaScript(L"document.documentElement.outerHTML",
+                    [callback](std::wstring raw) {
+                      // 1. On décode le JSON de WebView2 (qui gère désormais les \u003C !)
+                      std::wstring decoded = DecodeJsonStringResult(raw);
+                      // 2. On le formate proprement pour l'affichage
+                      std::wstring pretty = FormatHtml(decoded);
+                      
+                      callback(pretty);
+                    });
 }
 
 void WebViewPlusInstance::InjectScriptFromUrl(const std::wstring& url) {
@@ -1332,6 +1593,29 @@ void WebViewPlusInstance::InjectCssFromUrl(const std::wstring& url) {
       EscapeJsonString(url) +
       L"\";(document.head||document.documentElement).appendChild(l);})();";
   webview_->ExecuteScript(js.c_str(), nullptr);
+}
+
+void WebViewPlusInstance::InjectJsData(const std::wstring& js_data) {
+  if (!webview_) return;
+  webview_->ExecuteScript(js_data.c_str(), nullptr);
+}
+
+void WebViewPlusInstance::InjectCssData(const std::wstring& css_data) {
+  if (!webview_) return;
+  std::wstring js =
+      L"(function(){var s=document.createElement('style');s.type='text/css';"
+      L"s.appendChild(document.createTextNode(\"" +
+      EscapeJsonString(css_data) +
+      L"\"));(document.head||document.documentElement).appendChild(s);})();";
+  webview_->ExecuteScript(js.c_str(), nullptr);
+}
+
+void WebViewPlusInstance::SetDevToolsEnabled(bool enabled) {
+  if (!webview_) return;
+  Microsoft::WRL::ComPtr<ICoreWebView2Settings> settings;
+  if (SUCCEEDED(webview_->get_Settings(&settings)) && settings) {
+    settings->put_AreDevToolsEnabled(enabled ? TRUE : FALSE);
+  }
 }
 
 void WebViewPlusInstance::EvaluateJavaScript(
@@ -1564,6 +1848,30 @@ void WebViewPlusPluginCApi::RegisterWithRegistrar(
             }
           }
 
+          EncodableMap initial_data;
+          auto data_it = args->find(EncodableValue(std::string("initialData")));
+          if (data_it != args->end()) {
+            if (auto m = std::get_if<EncodableMap>(&data_it->second)) {
+              initial_data = *m;
+            }
+          }
+
+          EncodableMap scrollbar_theme;
+          auto scrollbar_it =
+              args->find(EncodableValue(std::string("scrollbarTheme")));
+          if (scrollbar_it != args->end()) {
+            if (auto m = std::get_if<EncodableMap>(&scrollbar_it->second)) {
+              scrollbar_theme = *m;
+            }
+          }
+
+          auto css_it = args->find(EncodableValue(std::string("initialCss")));
+          std::string initial_css =
+              (css_it != args->end() &&
+               std::holds_alternative<std::string>(css_it->second))
+                  ? std::get<std::string>(css_it->second)
+                  : "";
+
           HWND top_level_hwnd =
               registrar->GetView() ? registrar->GetView()->GetNativeWindow()
                                    : nullptr;
@@ -1587,6 +1895,7 @@ void WebViewPlusPluginCApi::RegisterWithRegistrar(
           auto instance = std::make_unique<WebViewPlusInstance>(
               registrar, g_platform.get(), message_hwnd, view_id, initial_url,
               initial_asset, initial_file, initial_settings, user_data_folder,
+              initial_data, scrollbar_theme, initial_css,
               [shared_result, view_id](int64_t texture_id) {
                 EncodableMap response;
                 response[EncodableValue("textureId")] =
@@ -1650,11 +1959,118 @@ void WebViewPlusPluginCApi::RegisterWithRegistrar(
             }
           }
           result->Success();
+        } else if (method == "setScrollbarTheme") {
+          auto theme_it =
+              args->find(EncodableValue(std::string("scrollbarTheme")));
+          if (theme_it != args->end()) {
+            if (auto m = std::get_if<EncodableMap>(&theme_it->second)) {
+              auto it = g_instances.find(view_id);
+              if (it != g_instances.end()) {
+                it->second->SetScrollbarTheme(*m);
+                it->second->ApplyScrollbarThemeLive();
+              }
+            }
+          }
+          result->Success();
         } else if (method == "dispose") {
           g_instances.erase(view_id);
           result->Success();
         } else {
           result->NotImplemented();
+        }
+      });
+
+  // Canal global partagé avec les autres plateformes pour les API qui ne
+  // sont pas rattachées à une instance de Webview précise (voir
+  // `WebviewCacheManager` et `WebviewPlusController.setWebContentsDebuggingEnabled`
+  // côté Dart).
+  auto info_channel = std::make_unique<flutter::MethodChannel<EncodableValue>>(
+      registrar->messenger(), "plugins.noam.me/webview_plus_info",
+      &flutter::StandardMethodCodec::GetInstance());
+
+  info_channel->SetMethodCallHandler(
+      [](const MethodCall<EncodableValue>& call,
+         std::unique_ptr<MethodResult<EncodableValue>> result) {
+        const std::string& method = call.method_name();
+
+        auto clear_data = [](COREWEBVIEW2_BROWSING_DATA_KINDS kinds,
+                              std::shared_ptr<MethodResult<EncodableValue>> shared_result) {
+          if (!g_default_profile) {
+            // Aucune Webview n'a encore été créée durant cette session : il
+            // n'existe donc pas encore de profil WebView2 par défaut dont
+            // dériver le cache à vider. Voir la note sur `clearCache` côté
+            // Dart (`WebviewCacheManager`).
+            shared_result->Error(
+                "NO_PROFILE",
+                "Aucune instance WebviewWidget n'a encore été créée : le "
+                "profil WebView2 par défaut n'existe pas encore.");
+            return;
+          }
+          g_default_profile->ClearBrowsingData(
+              kinds,
+              Microsoft::WRL::Callback<
+                  ICoreWebView2ClearBrowsingDataCompletedHandler>(
+                  [shared_result](HRESULT hr) -> HRESULT {
+                    if (SUCCEEDED(hr)) {
+                      shared_result->Success();
+                    } else {
+                      shared_result->Error("CLEAR_FAILED",
+                                            "ClearBrowsingData a échoué");
+                    }
+                    return S_OK;
+                  })
+                  .Get());
+        };
+
+        std::shared_ptr<MethodResult<EncodableValue>> shared_result(
+            result.release());
+
+        if (method == "clearCache") {
+          clear_data(static_cast<COREWEBVIEW2_BROWSING_DATA_KINDS>(
+                         COREWEBVIEW2_BROWSING_DATA_KINDS_DISK_CACHE |
+                         COREWEBVIEW2_BROWSING_DATA_KINDS_CACHE_STORAGE),
+                     shared_result);
+        } else if (method == "clearCookies") {
+          clear_data(COREWEBVIEW2_BROWSING_DATA_KINDS_COOKIES, shared_result);
+        } else if (method == "clearAllData") {
+          if (!g_default_profile) {
+            shared_result->Error(
+                "NO_PROFILE",
+                "Aucune instance WebviewWidget n'a encore été créée : le "
+                "profil WebView2 par défaut n'existe pas encore.");
+            return;
+          }
+          g_default_profile->ClearBrowsingDataAll(
+              Microsoft::WRL::Callback<
+                  ICoreWebView2ClearBrowsingDataCompletedHandler>(
+                  [shared_result](HRESULT hr) -> HRESULT {
+                    if (SUCCEEDED(hr)) {
+                      shared_result->Success();
+                    } else {
+                      shared_result->Error("CLEAR_FAILED",
+                                            "ClearBrowsingDataAll a échoué");
+                    }
+                    return S_OK;
+                  })
+                  .Get());
+        } else if (method == "setWebContentsDebuggingEnabled") {
+          const auto* args = std::get_if<EncodableMap>(call.arguments());
+          bool enabled = true;
+          if (args) {
+            auto it = args->find(EncodableValue(std::string("enabled")));
+            if (it != args->end()) {
+              if (auto b = std::get_if<bool>(&it->second)) {
+                enabled = *b;
+              }
+            }
+          }
+          g_web_contents_debugging_enabled = enabled;
+          for (auto& entry : g_instances) {
+            entry.second->SetDevToolsEnabled(enabled);
+          }
+          shared_result->Success();
+        } else {
+          shared_result->NotImplemented();
         }
       });
 

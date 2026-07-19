@@ -13,7 +13,7 @@ gchar *js_string_literal(const gchar *value) {
   return json != nullptr ? json : g_strdup("\"\"");
 }
 
-void inject_script_from_url(WebKitWebview *web_view, const gchar *url) {
+void inject_script_from_url(WebKitWebView *web_view, const gchar *url) {
   g_autofree gchar *literal = js_string_literal(url);
   g_autofree gchar *js = g_strdup_printf(
       "(function(){var s=document.createElement('script');s.src=%s;"
@@ -23,7 +23,7 @@ void inject_script_from_url(WebKitWebview *web_view, const gchar *url) {
                                       nullptr, nullptr, nullptr);
 }
 
-void inject_css_from_url(WebKitWebview *web_view, const gchar *url) {
+void inject_css_from_url(WebKitWebView *web_view, const gchar *url) {
   g_autofree gchar *literal = js_string_literal(url);
   g_autofree gchar *js = g_strdup_printf(
       "(function(){var l=document.createElement('link');l.rel='stylesheet';"
@@ -77,7 +77,7 @@ void handle_instance_method_call(LinuxWebview *webview,
                                  FlMethodCall *method_call) {
   const gchar *method = fl_method_call_get_name(method_call);
   FlValue *args = fl_method_call_get_args(method_call);
-  WebKitWebview *web_view = webview->web_view;
+  WebKitWebView *web_view = webview->web_view;
 
   if (strcmp(method, "loadUrl") == 0) {
     const gchar *url = map_lookup_string(args, "url");

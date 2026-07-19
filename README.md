@@ -14,7 +14,7 @@ Unlike other webview implementations that introduce complex virtualization layer
 | **iOS** | `WKWebview` (WebKit) | Native `UiKitView` (Full native composition) |
 | **macOS** | `WKWebview` (WebKit) | Native `AppKitView` (Full native composition) |
 | **Windows** | `Webview2` (Edge Chromium) | Win32 Composition over Flutter Direct3D Texture |
-| **Linux** | `WebKitWebview` (WebKitGTK) | Direct `GtkWidget` window overlay anchoring |
+| **Linux** | `WebKitWebView` (WebKitGTK) | Direct `GtkWidget` window overlay anchoring |
 | **Web** | Native DOM `<iframe>` | Standard HTML5 Element Embedding |
 
 ---
@@ -25,9 +25,12 @@ Unlike other webview implementations that introduce complex virtualization layer
 - **Bi-directional JavaScript Bridge:** 
   - Execute Dart to JS via `evaluateJavascript` with **automatic type unboxing** (returns real Dart types like `int`, `Map`, `List` instead of raw strings).
   - Handle JS to Dart messages using either basic string streaming or full-featured promises via `window.webview_plus.callHandler`.
-- **Custom Native Context Menus:** Fully customize text selection and long-press contextual menus on Android and iOS using native platform APIs (`ActionMode` & `UIContextMenuConfiguration`).
+- **Raw JS/CSS Injection Everywhere:** `injectJsData`/`injectCssData` (one-off, via the controller) and `WebviewWidget.initialCss` (re-applied on every page load) are fully functional on **all 5 platforms**.
+- **Custom Native Context Menus:** Fully customize text selection and long-press contextual menus on Android and iOS using native platform APIs (`ActionMode` & `UIContextMenuConfiguration`); `disableContextMenu`/`disableLongPressContextMenuOnLinks` additionally work natively on macOS (right-click).
 - **Comprehensive Lifecycle Callbacks:** Track page loading starts, stops, navigation interception, and handle platform-specific web view errors.
-- **Advanced Asset & File System Access:** Load URLs, bundle assets, or absolute file paths from the local device storage.
+- **Advanced Asset & File System Access:** Load URLs, bundle assets, or absolute file paths from the local device storage. `allowFileAccessFromFileURLs`/`allowUniversalAccessFromFileURLs` unlock local-file-to-local-file access on iOS/macOS.
+- **Scrollbar Theming (Windows/macOS/Linux):** Custom track/thumb colors, width, and light/dark/auto/hidden modes via `windowsScrollbarTheme`, applied through native composition on Windows and injected `::-webkit-scrollbar` CSS on macOS/Linux.
+- **Cache & Debug Utilities:** `WebviewCacheManager` clears HTTP cache/cookies/all web data across every Webview in the app; `WebviewPlusController.setWebContentsDebuggingEnabled()` globally toggles remote DevTools/Web Inspector access.
 - **Android Rendering Performance:** Defaults to Texture Layer Hybrid Composition (`initSurfaceAndroidView`) on API 23+, giving native-speed scrolling without the janky Flutter animations/transitions that plague classic Hybrid Composition. Automatically falls back to legacy modes on older devices.
 - **Android Preloading API:** `WebviewPlusPreloader` lets you warm up the WebView engine and/or prefetch a URL into the shared HTTP cache *before* the user opens a webview screen, for a near-instant first paint. See [Preloading & Faster First Load](#-preloading--faster-first-load-android) below.
 - **Automatic Script Injection:** Declare a list of `UserScript`s in `initialSettings.initialUserScripts` to have them injected automatically into every page the webview loads (Android/iOS/macOS).
@@ -168,6 +171,8 @@ The `WebviewPlusController` exposes full programmatic control over the browser s
 | `loadData(...)` | Advanced alternative to `loadHtmlString` supporting explicit custom `mimeType` (e.g. `image/svg+xml`) and `encoding`. |
 | `evaluateJavascript(String code)` | Runs arbitrary JS in the document scope and retrieves automatically unboxed Dart objects. |
 | `getHtml()` | Helper that queries and returns `document.documentElement.outerHTML`. |
+| `injectJsData(String jsData)` | Injects raw JavaScript code directly into the live page (executed immediately, once). **All 5 platforms.** |
+| `injectCssData(String cssData)` | Injects a raw CSS string directly into the live page via an on-the-fly `<style>` tag. **All 5 platforms.** |
 | `injectJavascriptFileFromUrl / Asset` | Injects an external or asset-based `<script>` file straight into the live DOM tree. |
 | `injectCSSFileFromUrl / Asset` | Appends remote stylesheets or asset-based CSS rules into the live DOM layout. |
 | `goBack() / goForward()` | Navigates backwards or forwards through the session browsing history stack. |
@@ -217,6 +222,49 @@ WebviewPlusPreloader.preloadUrl('https://example.com/article/123');
 
 ---
 
+### 4. Cache & Data Management (`WebviewCacheManager`)
+
+Independently of any [WebviewWidget] currently on screen, you can clear the data shared by every non-`incognito` Webview in your app:
+
+```dart
+// HTTP cache only (images, scripts, fetch/XHR responses...)
+await WebviewCacheManager.clearCache();
+
+// Cookies only
+await WebviewCacheManager.clearCookies();
+
+// Everything: cache, cookies, localStorage, IndexedDB, service workers...
+await WebviewCacheManager.clearAllData();
+```
+
+Available on all 5 platforms. On Windows specifically, `clearCache()`/`clearAllData()` need at least one `WebviewWidget` to have already been created during the app session (the default WebView2 profile only exists from that point on) — call it after your first webview is created rather than at app launch.
+
+### 5. Remote Debugging Toggle (`WebviewPlusController.setWebContentsDebuggingEnabled`)
+
+Unlike `WebviewSettings.isInspectable` (which only applies to the single instance it's set on), this toggles Chrome DevTools / Safari Web Inspector access for **every** Webview in the app, existing and future ones — handy to gate behind `kDebugMode`:
+
+```dart
+void main() {
+  if (kDebugMode) {
+    WebviewPlusController.setWebContentsDebuggingEnabled();
+  }
+  runApp(const MyApp());
+}
+```
+
+### 6. Raw CSS Injected on Every Load (`initialCss`)
+
+```dart
+WebviewWidget(
+  initialUrl: 'https://example.com',
+  initialCss: 'body { font-family: "Inter", sans-serif; }',
+)
+```
+
+Unlike `injectCssData` on the controller (a one-off injection into whatever page is currently loaded), `initialCss` is re-applied automatically on every page load — including subsequent in-app navigations — on all 5 platforms.
+
+---
+
 ## ⚙️ Configuration Options (`WebviewSettings`)
 
 Pass a custom `WebviewSettings` configuration object to fully customize behavior per-platform:
@@ -246,8 +294,8 @@ const WebviewSettings(
 | `initialBackgroundColor` | `null` | All | Optional default color painted as a fallback behind transparent areas or while the Webview initially initializes. |
 | `userAgent` | `null` | All | Override target browser layout engine header. `null` falls back to system default. |
 | `isInspectable` | `false` | All | Opens hooks for Safari Web Inspector or Chrome DevTools remote attachment. |
-| `disableContextMenu` | `false` | Android/iOS | Disables long-press menus and touch selection interactions completely. |
-| `disableLongPressContextMenuOnLinks`| `false` | Android/iOS | Prevents special links preview/copy contextual windows specifically. |
+| `disableContextMenu` | `false` | Android/iOS/macOS | Disables long-press (mobile) / right-click (macOS) contextual menus and touch selection interactions completely. |
+| `disableLongPressContextMenuOnLinks`| `false` | Android/iOS/macOS | Prevents special links preview/copy contextual windows specifically. |
 | `selectionTextColor` | `null` | All (native handle tint: Android only) | Colors selected-text highlighting via an injected `::selection` CSS rule on every loaded page. On Android, also attempts a best-effort native tint of the selection handles themselves — see the caveat below. |
 | `selectionHandleColor` | `null` | Android | Companion color for the native selection "handle" drop. Best-effort only: Android doesn't allow overriding a theme attribute with an arbitrary runtime value, so the plugin ships a compiled color resource (`@color/webview_plus_selection_handle_color`) that actually drives the handle tint — override that resource in your own app's `res/values` for a build-time-fixed value. |
 | `androidPlatformViewType` | `AndroidPlatformViewType.surfaceComposition` | Android | Choose Android rendering mode: `surfaceComposition` (Texture Layer Hybrid Composition, recommended, API 23+), `hybridComposition` (classic Hybrid Composition, robust but can be janky during Flutter animations), or `virtualDisplay` (TextureView, less fluid scroll but broadest device compatibility). On API < 23, `surfaceComposition` automatically falls back to `hybridComposition` to ensure proper rendering. |
@@ -258,6 +306,27 @@ const WebviewSettings(
 | `disablePrinting` | `false` | All | Blocks printing triggered via the `Ctrl+P` shortcut and, where the platform supports it, `window.print()`. |
 | `initialUserScripts` | `[]` | Android/iOS/macOS | JavaScript `UserScript`s automatically injected into every page that loads. |
 | `disableKeyboardResize` | `false` | Android/iOS | Prevents the webview from resizing when the on-screen keyboard appears. Purely native, based on system IME insets — no `window.innerHeight` JS hacks involved. |
+| `windowsScrollbarTheme` | `WindowsScrollbarTheme()` | Windows/macOS/Linux | Custom scrollbar colors (track/thumb/thumb-hover) and mode (`auto`/`light`/`dark`/`custom`/`hidden`), via `DesktopScrollbarThemeMode`. Applied through native composition on Windows and via injected `::-webkit-scrollbar` CSS on macOS/Linux. No effect on Android/iOS. |
+| `cacheEnabled` | `true` | All | Toggle session and HTTP caching. On iOS/macOS, tied to the same non-persistent data store used by `incognito`. |
+| `incognito` | `false` | All | Run webview in a private/incognito profile — no cookies, cache, `localStorage`, or history persisted beyond the webview's lifetime. |
+| `applicationNameForUserAgent` | `null` | All | Easily append a custom app name to the default User Agent, without overriding it entirely (see `userAgent` for that). |
+| `textZoom` | `100` | Android/Windows/Linux | Adjust text sizing percentage. No effect on iOS/macOS (no equivalent independent of page zoom). |
+| `minimumFontSize` | `null` | Android/iOS/macOS | Enforce a minimum readable font size, in CSS pixels. |
+| `allowsInlineMediaPlayback` | `true` | iOS | Native control over inline video playback instead of forced fullscreen. Not needed elsewhere: Android/Windows/Linux already play media inline by default, and macOS never forces fullscreen in the first place. |
+| `allowsPictureInPicture` | `true` | iOS/macOS | Allow Picture-in-Picture mode on supported native media. |
+| `javaScriptCanOpenWindowsAutomatically` | `false` | All | Prevent/allow `window.open()` calls without a prior user gesture. |
+| `geolocationEnabled` | `false` | Android | Native hardware geolocation toggle (`navigator.geolocation`). Actual grant also depends on OS-level permissions, requested separately on the Flutter side. |
+| `thirdPartyCookiesEnabled` | `true` | Android | Manage cross-site cookie settings (`CookieManager.setAcceptThirdPartyCookies`). |
+| `forceDarkMode` | `false` | Android/Windows/macOS | Explicitly force a dark rendering of the page even if it doesn't implement `prefers-color-scheme` itself. On macOS this is done by forcing the view's effective `NSAppearance` to `.darkAqua`, which `WKWebView` picks up for the CSS media query. |
+| `overScrollMode` | `OverScrollMode.ifContentScrolls` | Android (native), Windows/Linux (best-effort CSS `overscroll-behavior`) | Controls the overscroll glow/bounce effect at scroll boundaries. No effect on iOS/macOS, where `bounces` drives this instead. |
+| `webviewContentMode` | `WebviewContentMode.recommended` | Android | Forces the Desktop or Mobile version of a page, or leaves it to the platform's recommended default. |
+| `bounces` | `true` | iOS | Enables the "bounce" scroll physics past content edges (`UIScrollView.bounces`). Not applicable on macOS: `WKWebView` doesn't expose a public equivalent there. |
+| `initialScale` | `null` | Android | Set default viewport zoom scale (`WebView.setInitialScale`). `null` leaves the page's own viewport meta tag in control. |
+| `hideNativeScrollbars` | `false` | All | Easily hide default scrollbars while keeping the content scrollable. On macOS/Linux this reuses the same `::-webkit-scrollbar` CSS mechanism as `windowsScrollbarTheme` above, and takes priority over it when both are set. |
+| `safeBrowsingEnabled` | `true` | Android | Toggle Google Safe Browsing checks for known phishing/malware pages. |
+| `allowMixedContent` | `false` | Android | Allow loading `http://` resources inside an `https://` page. |
+| `allowFileAccessFromFileURLs` | `false` | iOS/macOS | Allows a page loaded from `file://` to fetch other local files via `fetch`/XHR. Off by default (WebKit blocks this for security) — this is the most common cause of a local file that "won't open" (relative resources not found). No effect on Android/Windows/Linux, which already allow this natively. |
+| `allowUniversalAccessFromFileURLs` | `false` | iOS/macOS | More permissive superset of `allowFileAccessFromFileURLs`: also allows a `file://` page to request *any* origin, including `http(s)://`. Only enable this for trusted bundled content you control — never for remote/untrusted pages, as it disables an important security boundary. Implies `allowFileAccessFromFileURLs`. |
 
 > **Note on `selectionHandleColor` (Android):** the CSS-based highlight (`selectionTextColor`) always applies reliably. The native handle tint is best-effort only — Android doesn't let a theme attribute be overridden with an arbitrary runtime value, only with resources compiled into the app. The dynamic color you pass drives the native handle tint only insofar as it matches the compiled `@color/webview_plus_selection_handle_color` resource shipped by the plugin.
 
@@ -279,11 +348,14 @@ Add this code in DebugProfile.entitlements and Release.entitlements to have acce
 
 ## ⚠️ Known Limitations & Architecture Caveats
 
-- **Windows & Linux (Advanced Composition):** Both Windows (`Webview2`) and Linux (`WebKitWebview`) use simplified window rendering strategies. True seamless stacking layouts (advanced transparency masks, multi-layered Flutter widgets directly over or under the web layer) may require unique configurations within the specific target OS shell runner.
+- **Windows & Linux (Advanced Composition):** Both Windows (`Webview2`) and Linux (`WebKitWebView`) use simplified window rendering strategies. True seamless stacking layouts (advanced transparency masks, multi-layered Flutter widgets directly over or under the web layer) may require unique configurations within the specific target OS shell runner.
 - **Linux Overlay Architecture:** Since Linux lacks generic `PlatformView` composition hooks inside Flutter's engine core, this plugin binds a direct native `GtkWidget` on top of the Flutter window frame coordinates dynamically. Size, placement, and lifecycle updates are synchronised directly over global method channels.
 - **Web Iframes Constraints:** `onNavigationRequest` is fully dependable only when loading content with matching origins (such as local bundled assets). Standard web browser security frames block cross-origin navigation interceptions on independent `<iframe>` nodes.
 - **Android Composition Mode Detection:** The plugin queries the device's API level asynchronously on first use and optimistically assumes API 23+ (Texture Layer Hybrid Composition) while that check is in flight — accurate for the vast majority of active devices. On the rare API < 23 device, the widget seamlessly rebuilds with the correct legacy mode once the check resolves, which may cause a single, barely noticeable extra rebuild the very first time a webview is shown in the app's lifetime.
 - **`preloadUrl` Has No Effect on Uncacheable Content:** Preloading only helps for resources the server allows to be cached (see [Preloading & Faster First Load](#-preloading--faster-first-load-android)).
+- **`WebviewCacheManager.clearCache()`/`clearAllData()` on Windows:** need at least one `WebviewWidget` to have already been created during the app session, since the default WebView2 profile they operate on doesn't otherwise exist yet.
+- **`WebviewPlusController.setWebContentsDebuggingEnabled()` on iOS/macOS:** best-effort — relies on `WKWebView.isInspectable`, only available on iOS 16.4+/macOS 13.3+. On older OS versions it's a silent no-op; use `WebviewSettings.isInspectable` at webview creation time instead.
+- **`bounces` / `allowsInlineMediaPlayback`:** iOS-only. `WKWebView` on macOS never forces fullscreen media playback and doesn't expose a public bounce-physics API, so neither setting has a macOS equivalent.
 
 ---
 

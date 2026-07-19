@@ -1,3 +1,39 @@
+## 0.8.0
+
+* **Announcement**: **Linux and Web platforms are now fully functional and supported!** 🚀
+* **Feature**: `injectJsData` / `injectCssData` (injecting raw JS/CSS directly into the active page) are now functional across **all 7 platforms** (Android, iOS, macOS, Windows, Linux, Web). Previously, only file/asset-based injections (`injectJavascriptFileFromUrl`, `injectCSSFileFromUrl`, etc.) worked natively.
+* **Feature**: Added `WebviewWidget.initialCss` to automatically reinject raw CSS on every page load (initial or following navigation) across all 7 platforms.
+* **Feature**: Added `WebviewSettings.allowFileAccessFromFileURLs` and `WebviewSettings.allowUniversalAccessFromFileURLs` (iOS/macOS). Enable these if a page loaded from the local disk (`loadFile`/`loadFlutterAsset`) fails to fetch other local files via `fetch`/XHR—the most common cause of local files "not opening" on these two platforms.
+* **Feature**: Added `WebviewCacheManager` (`clearCache()`, `clearCookies()`, `clearAllData()`) to clear HTTP cache, cookies, or all web data across the application's Webviews, independent of any active on-screen instance. Available across all 7 platforms.
+* **Feature**: Added `WebviewPlusController.setWebContentsDebuggingEnabled()` to enable/disable remote inspection (Chrome DevTools/Safari Web Inspector) globally for all current and future Webviews in the app, unlike `WebviewSettings.isInspectable` which applies to a single instance.
+* **Feature**: Extended custom scrollbar coloring (previously Windows-only, see `DesktopScrollbarThemeMode`) to **macOS and Linux**, as both expose the same `::-webkit-scrollbar*` CSS pseudo-elements as WebView2/Chromium.
+* **Fix (macOS)**: `disableContextMenu` and `disableLongPressContextMenuOnLinks` previously blocked the context menu by clearing it after creation (`willOpenMenu`), which could sometimes leave an empty menu visible (specifically the word selection menu). The menu is now prevented from building ahead of time (`menu(for:)`), fixing the residual empty menu when right-clicking selected text.
+* **Fix (macOS)**: Fixed a bug where `selectionTextColor` was being read from the wrong settings key (`selectionHandleColor`, which is Android-specific) and had no actual effect.
+* **Improvement**: Significantly expanded `WebviewSettings` coverage on macOS to match iOS/Android parity: `mediaPlaybackRequiresUserGesture`, `initialBackgroundColor`, `disablePrinting` (JS + Cmd+P shortcut), `allowsPictureInPicture`, `cacheEnabled`, `forceDarkMode` (via `NSAppearance`, forcing `prefers-color-scheme: dark`), and `hideNativeScrollbars` (via CSS injection, now shared with Linux).
+* **Feature**: Added `WebviewInitialData` to `WebviewWidget` for advanced raw data and HTML loading with `mimeType`, `encoding`, `baseUrl`, and `androidHistoryUrl` across all platforms (Windows ignores `baseUrl` due to native WebView2 limitations).
+* **Feature**: Added comprehensive Windows scrollbar theming support via `DesktopScrollbarThemeMode` (auto, light, dark, custom, and hidden modes). Supports runtime updates of track/thumb colors, width, and hover states.
+* **Feature**: Significantly expanded `WebviewSettings` with a suite of new cross-platform controls:
+  * `cacheEnabled` (All) — Toggle session and HTTP caching.
+  * `incognito` (All) — Run webview in private/incognito profile.
+  * `applicationNameForUserAgent` (All) — Easily append a custom app name to the default User Agent.
+  * `textZoom` (Android) — Adjust text sizing percentages.
+  * `minimumFontSize` (Android/iOS/macOS) — Enforce a minimum readable font size.
+  * `allowsInlineMediaPlayback` (iOS/macOS) — Native control over inline video.
+  * `allowsPictureInPicture` (iOS/macOS) — Allow PiP mode on supported native media.
+  * `javaScriptCanOpenWindowsAutomatically` (All) — Prevent/allow window.open calls.
+  * `geolocationEnabled` (Android) — Native hardware geolocation toggle.
+  * `thirdPartyCookiesEnabled` (Android) — Manage cross-site cookie settings.
+  * `forceDarkMode` (Android) — Explicitly force dark mode mapping.
+  * `overScrollMode` (Android) — Control native overscroll glow behavior.
+  * `bounces` (iOS/macOS) — Control scroll bouncing physics.
+  * `initialScale` (Android) — Set default viewport zoom scale.
+  * `hideNativeScrollbars` (All) — Easily hide default scrollbars.
+  * `safeBrowsingEnabled` (Android) — Toggle Google Safe Browsing checks.
+  * `allowMixedContent` (Android) — Allow loading HTTP content inside HTTPS pages.
+* **Change**: Changed `getHtml` to return a formatted HTML string (with proper indentation and newlines) on Windows.
+* **Feature**: Added `onFontsIsLoaded` callback on Windows, Android, and macOS.
+* **Dependency**: Updated to use the new `androidx.webkit:webkit:1.16.0` dependency on Android.
+
 ## 0.7.1
 
 * Fixed Windows WebView bridge initialization: Isolated user scripts in try-catch blocks and optimized execution order to prevent custom scripts from blocking addJavaScriptHandler.

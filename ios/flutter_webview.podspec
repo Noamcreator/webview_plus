@@ -1,19 +1,19 @@
 #
 # To learn more about a Podspec see http://guides.cocoapods.org/syntax/podspec.html.
-# Run `pod lib lint webview_plus.podspec` to validate before publishing.
+# Run `pod lib lint flutter_webview.podspec` to validate before publishing.
 #
 Pod::Spec.new do |s|
-  s.name             = 'webview_plus'
-  s.version          = '0.8.0'
-  s.summary          = 'A cross-platform Flutter plugin that directly encapsulates native WebViews (Android, iOS/macOS, Windows, Linux andWeb) with no WebView dependencies.'
+  s.name             = 'flutter_webview'
+  s.version          = '0.0.1'
+  s.summary          = 'A new Flutter plugin project.'
   s.description      = <<-DESC
-  A cross-platform Flutter plugin that directly encapsulates native WebViews (Android, iOS/macOS, Windows, Linux andWeb) with no WebView dependencies.
+A new Flutter plugin project.
                        DESC
-  s.homepage         = 'https://github.com/Noamcreator/webview_plus'
+  s.homepage         = 'http://noam.me'
   s.license          = { :file => '../LICENSE' }
-  s.author           = { 'Noam' => 'noam.bourmault@gmail.com' }
+  s.author           = { 'Your Company' => 'email@noam.me' }
   s.source           = { :path => '.' }
-  s.source_files = 'webview_plus/Sources/webview_plus/**/*'
+  s.source_files = 'flutter_webview/Sources/flutter_webview/**/*'
   s.dependency 'Flutter'
   s.platform = :ios, '13.0'
   s.frameworks = 'WebKit'
@@ -26,5 +26,5 @@ Pod::Spec.new do |s|
   # required reason APIs, update the PrivacyInfo.xcprivacy file to describe your
   # plugin's privacy impact, and then uncomment this line. For more information,
   # see https://developer.apple.com/documentation/bundleresources/privacy_manifest_files
-  # s.resource_bundles = {'webview_plus_privacy' => ['webview_plus/Sources/webview_plus/PrivacyInfo.xcprivacy']}
+  # s.resource_bundles = {'flutter_webview_privacy' => ['flutter_webview/Sources/flutter_webview/PrivacyInfo.xcprivacy']}
 end

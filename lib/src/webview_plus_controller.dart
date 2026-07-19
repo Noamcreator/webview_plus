@@ -1,70 +1,14 @@
 import 'dart:async';
 import 'dart:convert';
-import 'package:flutter/foundation.dart' show TargetPlatform, defaultTargetPlatform, kIsWeb;
 import 'package:flutter/services.dart';
 
 import 'webview_plus_context_menu.dart';
 
-/// Déclenche, côté Android uniquement (no-op silencieux ailleurs), un
-/// préchauffage du moteur WebView et/ou un préchargement réseau d'une URL,
-/// **avant** qu'un [WebviewWidget] ne soit réellement affiché à l'écran.
-///
-/// Le préchauffage (voir [warmUp]) sort le coût d'initialisation du moteur
-/// Chromium (dominant à la toute première Webview créée dans le process,
-/// pas les suivantes) du chemin critique de la première ouverture visible
-/// par l'utilisateur.
-///
-/// Le préchargement d'URL (voir [preloadUrl]) charge la page en arrière-plan
-/// dans une Webview invisible et jetable pour remplir le cache HTTP partagé
-/// par toutes les instances de l'app : la prochaine vraie Webview chargeant
-/// la même URL en profite (sous réserve des en-têtes de cache envoyés par
-/// le serveur — cet appel n'offre aucune garantie sur du contenu non
-/// cacheable).
-///
-/// Exemple d'usage typique : dans une liste d'articles, précharger l'URL de
-/// l'article probablement consulté ensuite dès que la liste est affichée.
-class WebviewPlusPreloader {
-  WebviewPlusPreloader._();
-
-  static const MethodChannel _channel =
-      MethodChannel('plugins.noam.me/webview_plus_info');
-
-  static bool get _isSupportedPlatform =>
-      !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
-
-  /// Pré-construit [count] instance(s) de `WebView` Android en arrière-plan
-  /// (entre 1 et 5, au-delà l'intérêt marginal ne justifie pas le coût
-  /// mémoire). À appeler tôt dans la vie de l'app — par exemple juste après
-  /// le premier frame affiché (`WidgetsBinding.instance.addPostFrameCallback`
-  /// depuis votre écran d'accueil), pas avant `runApp` puisque le canal de
-  /// méthode nécessite le binding Flutter déjà initialisé.
-  static Future<void> warmUp({int count = 1}) async {
-    if (!_isSupportedPlatform) return;
-    try {
-      await _channel.invokeMethod('warmUp', {'count': count});
-    } catch (_) {
-      // Best-effort : une erreur ici ne doit jamais empêcher le
-      // fonctionnement normal de l'app.
-    }
-  }
-
-  /// Précharge [url] en arrière-plan. Peut être appelé plusieurs fois pour
-  /// des URLs différentes (chacune est prise en charge indépendamment) ;
-  /// un appel répété avec la même URL pendant qu'un préchargement est déjà
-  /// en cours pour celle-ci est ignoré côté natif.
-  static Future<void> preloadUrl(String url) async {
-    if (!_isSupportedPlatform) return;
-    try {
-      await _channel.invokeMethod('preloadUrl', {'url': url});
-    } catch (_) {}
-  }
-}
-
 /// Interface commune implémentée par le contrôleur natif
-/// ([WebviewPlusController]) et par le contrôleur Web
+/// ([WebviewBaseController]) et par le contrôleur Web
 /// (`WebviewPlusWebController`), afin que le widget public
 /// puisse exposer la même API quelle que soit la plateforme.
-abstract class WebviewPlatformController {
+abstract class WebviewPlusController {
   Future<void> loadUrl(String url);
   Future<void> loadFlutterAsset(String assetPath);
 
@@ -83,6 +27,10 @@ abstract class WebviewPlatformController {
     String? baseUrl,
   });
 
+  /// Retourne le HTML actuellement rendu par la page
+  /// (`document.documentElement.outerHTML`).
+  Future<String?> getHtml();
+
   /// Exécute [code] dans le contexte de la page et retourne le résultat
   /// décodé en type Dart natif (`String`, `num`, `bool`, `List`, `Map`, ou
   /// `null`), et non plus systématiquement une `String`.
@@ -91,15 +39,17 @@ abstract class WebviewPlatformController {
   /// désormais l'`int` `2` et non la chaîne `"2"`.
   Future<dynamic> evaluateJavascript(String code);
 
-  /// Retourne le HTML actuellement rendu par la page
-  /// (`document.documentElement.outerHTML`).
-  Future<String?> getHtml();
+  /// Injecte du code JavaScript brut directement dans la page en cours.
+  Future<void> injectJsData(String jsData);
 
   /// Injecte un fichier `<script>` distant dans la page en cours.
   Future<void> injectJavascriptFileFromUrl(String urlFile);
 
   /// Injecte un fichier `<script>` provenant des assets Flutter.
   Future<void> injectJavascriptFileFromAsset(String assetFilePath);
+
+  /// Injecte du code CSS brut directement dans la page en cours.
+  Future<void> injectCssData(String cssData);
 
   /// Injecte une feuille de style distante dans la page en cours.
   Future<void> injectCSSFileFromUrl(String urlFile);
@@ -132,17 +82,17 @@ abstract class WebviewPlatformController {
 
 /// Callback appelé à chaque tentative de navigation.
 /// Retourner `true` autorise la navigation, `false` la bloque.
-typedef NavigationRequestCallback = FutureOr<bool> Function(WebviewPlatformController controller, Uri uri);
+typedef NavigationRequestCallback = FutureOr<bool> Function(WebviewPlusController controller, Uri uri);
 
 /// Callback appelé lorsque du JavaScript envoie un message via
 /// `WebviewPlusChannel.postMessage(...)`.
-typedef WebviewMessageCallback = void Function(WebviewPlatformController controller, String message);
+typedef WebviewMessageCallback = void Function(WebviewPlusController controller, String message);
 
 /// Callback appelé au début / à la fin du chargement d'une page.
-typedef WebviewLoadCallback = void Function(WebviewPlatformController controller, Uri uri);
+typedef WebviewLoadCallback = void Function(WebviewPlusController controller, Uri uri);
 
 /// Callback appelé avec un controller
-typedef WebviewControllerCallback = void Function(WebviewPlatformController controller);
+typedef WebviewControllerCallback = void Function(WebviewPlusController controller);
 
 /// Callback appelé lorsque le curseur système à afficher au-dessus de la
 /// Webview change (Windows uniquement, mode composition). [cursorKind] est
@@ -150,13 +100,13 @@ typedef WebviewControllerCallback = void Function(WebviewPlatformController cont
 /// "resizeLeftRight", "resizeUpDown", "allScroll", "forbidden") à mapper
 /// vers un `SystemMouseCursor` côté widget.
 typedef WebviewCursorCallback = void Function(
-  WebviewPlatformController controller,
+  WebviewPlusController controller,
   String cursorKind,
 );
 
 /// Callback appelé lorsqu'une erreur de chargement survient.
 typedef WebviewErrorCallback = void Function(
-  WebviewPlatformController controller,
+  WebviewPlusController controller,
   String url,
   int errorCode,
   String description,
@@ -168,8 +118,15 @@ typedef JavaScriptHandlerCallback = FutureOr<dynamic> Function(
   List<dynamic> args,
 );
 
-/// Callback appelé lorsque la vue native est prête et que le
-/// [WebviewPlusController] associé est disponible.
+/// Callback appelé lorsque la vue (native ou Web) est prête et que le
+/// contrôleur associé est disponible.
+///
+/// Le type de paramètre est l'interface [WebviewPlusController] et non
+/// la classe concrète [WebviewBaseController] : sur Web, le contrôleur
+/// fourni est en réalité un `WebviewPlusWebController` (voir
+/// `webview_plus_web.dart`), qui n'étend pas [WebviewBaseController]. Avec
+/// un typedef restreint à ce dernier, ce callback ne serait jamais déclenché
+/// sur Web.
 typedef WebviewCreatedCallback = void Function(
     WebviewPlusController controller);
 
@@ -179,7 +136,7 @@ typedef WebviewCreatedCallback = void Function(
 /// chargées à ce moment (peut être vide si la page n'utilise que des
 /// polices système).
 typedef WebviewFontsLoadedCallback = void Function(
-  WebviewPlatformController controller,
+  WebviewPlusController controller,
   List<String> loadedFontFamilies,
 );
 
@@ -190,10 +147,43 @@ typedef WebviewFontsLoadedCallback = void Function(
 /// nommé `webview_plus_<viewId>`, où `viewId` est l'identifiant
 /// entier attribué par Flutter à la plateforme view (AndroidView /
 /// UiKitView) au moment de sa création.
-class WebviewPlusController implements WebviewPlatformController {
-  WebviewPlusController._(this._channel);
+class WebviewBaseController implements WebviewPlusController {
+  WebviewBaseController._(this._channel);
 
-  static late WebviewPlusController _controller;
+  static late WebviewBaseController _controller;
+
+  static const MethodChannel _infoChannel = MethodChannel('plugins.noam.me/webview_plus_info');
+
+  /// Active ou désactive l'inspection distante (Chrome DevTools / Safari
+  /// Web Inspector) pour **toutes** les Webviews de l'application,
+  /// existantes et futures — à la différence de
+  /// [WebviewSettings.isInspectable], qui ne s'applique qu'à une seule
+  /// instance au moment de sa création.
+  ///
+  /// À appeler tôt (par exemple au lancement de l'app, uniquement en debug)
+  /// : `WebviewPlusController.setWebContentsDebuggingEnabled();`
+  ///
+  /// - Android : `WebView.setWebContentsDebuggingEnabled` (API native
+  ///   globale, effet immédiat sur toutes les instances).
+  /// - Windows : bascule `AreDevToolsEnabled` sur chaque profil WebView2
+  ///   déjà créé et mémorise la valeur pour les prochains.
+  /// - iOS/macOS : équivalent best-effort — bascule `isInspectable` sur
+  ///   chaque `WKWebView` déjà créée (iOS 16.4+/macOS 13.3+ uniquement ;
+  ///   no-op silencieux sur les versions plus anciennes du système, où
+  ///   seul [WebviewSettings.isInspectable] posé à la création reste
+  ///   possible).
+  /// - Linux : sans effet (WebKitGTK expose l'inspecteur via
+  ///   [WebviewSettings.isInspectable] uniquement).
+  static Future<void> setWebContentsDebuggingEnabled([bool enabled = true]) async {
+    try {
+      await _infoChannel.invokeMethod<void>(
+        'setWebContentsDebuggingEnabled',
+        {'enabled': enabled},
+      );
+    } on MissingPluginException {
+      // Plateforme ne supportant pas encore cet appel : no-op silencieux.
+    }
+  }
 
   final MethodChannel _channel;
 
@@ -216,7 +206,7 @@ class WebviewPlusController implements WebviewPlatformController {
 
   /// Utilisé en interne par le widget pour instancier le contrôleur
   /// dès que la vue native est créée.
-  static WebviewPlusController init(
+  static WebviewBaseController init(
     int viewId, {
     NavigationRequestCallback? onNavigationRequest,
     WebviewMessageCallback? onMessageReceived,
@@ -231,7 +221,7 @@ class WebviewPlusController implements WebviewPlatformController {
     List<ContextMenuItem> contextMenuItems = const <ContextMenuItem>[],
   }) {
     final channel = MethodChannel('webview_plus_$viewId');
-    _controller = WebviewPlusController._(channel)
+    _controller = WebviewBaseController._(channel)
       .._onNavigationRequest = onNavigationRequest
       .._onMessageReceived = onMessageReceived
       .._onLoadStart = onLoadStart
@@ -376,8 +366,7 @@ class WebviewPlusController implements WebviewPlatformController {
   /// Exemple : `controller.loadFlutterAsset('assets/index.html');`
   @override
   Future<void> loadFlutterAsset(String assetPath) {
-    return _channel
-        .invokeMethod<void>('loadFlutterAsset', {'assetPath': assetPath});
+    return _channel.invokeMethod<void>('loadFlutterAsset', {'assetPath': assetPath});
   }
 
   /// Charge un fichier n'importe où sur le disque via un chemin absolu.
@@ -391,8 +380,7 @@ class WebviewPlusController implements WebviewPlatformController {
   /// Charge une chaîne HTML brute directement.
   @override
   Future<void> loadHtmlString(String html, {String? baseUrl}) {
-    return _channel.invokeMethod<void>(
-        'loadHtmlString', {'html': html, 'baseUrl': baseUrl});
+    return _channel.invokeMethod<void>('loadHtmlString', {'html': html, 'baseUrl': baseUrl});
   }
 
   @override
@@ -427,27 +415,33 @@ class WebviewPlusController implements WebviewPlatformController {
   }
 
   @override
+  Future<void> injectJsData(String jsData) {
+    return _channel.invokeMethod<void>('injectJsData', {'jsData': jsData});
+  }
+
+  @override
   Future<void> injectJavascriptFileFromUrl(String urlFile) {
-    return _channel
-        .invokeMethod<void>('injectJavascriptFileFromUrl', {'url': urlFile});
+    return _channel.invokeMethod<void>('injectJavascriptFileFromUrl', {'url': urlFile});
   }
 
   @override
   Future<void> injectJavascriptFileFromAsset(String assetFilePath) {
-    return _channel.invokeMethod<void>(
-        'injectJavascriptFileFromAsset', {'assetFilePath': assetFilePath});
+    return _channel.invokeMethod<void>('injectJavascriptFileFromAsset', {'assetFilePath': assetFilePath});
+  }
+
+  @override
+  Future<void> injectCssData(String cssData) {
+    return _channel.invokeMethod<void>('injectCssData', {'cssData': cssData});
   }
 
   @override
   Future<void> injectCSSFileFromUrl(String urlFile) {
-    return _channel
-        .invokeMethod<void>('injectCSSFileFromUrl', {'url': urlFile});
+    return _channel.invokeMethod<void>('injectCSSFileFromUrl', {'url': urlFile});
   }
 
   @override
   Future<void> injectCSSFileFromAsset(String assetFilePath) {
-    return _channel.invokeMethod<void>(
-        'injectCSSFileFromAsset', {'assetFilePath': assetFilePath});
+    return _channel.invokeMethod<void>('injectCSSFileFromAsset', {'assetFilePath': assetFilePath});
   }
 
   @override
