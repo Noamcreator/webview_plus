@@ -2,7 +2,7 @@ PODS:
   - Flutter (1.0.0)
   - integration_test (0.0.1):
     - Flutter
-  - webview_plus (0.8.0):
+  - webview_plus (0.8.1):
     - Flutter
 
 DEPENDENCIES:
