@@ -1,18 +1,22 @@
+## 0.8.3
+
+* Remove the "Picture in picture" in macOS to remove the build failed.
+
 ## 0.8.2
 
 ### Fixed
-- **Linux: fixed a critical bug where opening a `WebviewWidget` could corrupt the Flutter engine's OpenGL rendering context**, breaking rendering across the *entire* app — not just the webview. Depending on timing, this ranged from a black band covering all Flutter widgets to a complete engine failure (`FlutterEngineRunTask` repeatedly returning `kInvalidArguments`, nothing rendering at all). Root cause: the plugin reparented the Flutter `FlView` into a new `GtkOverlay` *after* the engine had already bound its GL resource context to the view's original `GdkWindow`; tearing that window down and rebuilding it mid-session invalidated the context.
+* **Linux: fixed a critical bug where opening a `WebviewWidget` could corrupt the Flutter engine's OpenGL rendering context**, breaking rendering across the *entire* app — not just the webview. Depending on timing, this ranged from a black band covering all Flutter widgets to a complete engine failure (`FlutterEngineRunTask` repeatedly returning `kInvalidArguments`, nothing rendering at all). Root cause: the plugin reparented the Flutter `FlView` into a new `GtkOverlay` *after* the engine had already bound its GL resource context to the view's original `GdkWindow`; tearing that window down and rebuilding it mid-session invalidated the context.
 
 ### Changed — action required on Linux
-- **The `GtkOverlay` used to host native Webviews must now be created up front in `linux/my_application.cc`, before the engine starts rendering**, instead of being assembled at runtime by the plugin. This is what actually fixes the bug above. See the new **[Setup on Linux](README.md#setup-on-linux)** section for the exact snippet to add.
-- The plugin's previous runtime fallback (reparenting the `FlView` on first Webview creation) is kept only as a safety net for projects that haven't applied this change yet, and is no longer the recommended path — it remains susceptible to the rendering bug described above.
+* **The `GtkOverlay` used to host native Webviews must now be created up front in `linux/my_application.cc`, before the engine starts rendering**, instead of being assembled at runtime by the plugin. This is what actually fixes the bug above. See the new **[Setup on Linux](README.md#setup-on-linux)** section for the exact snippet to add.
+* The plugin's previous runtime fallback (reparenting the `FlView` on first Webview creation) is kept only as a safety net for projects that haven't applied this change yet, and is no longer the recommended path — it remains susceptible to the rendering bug described above.
 
 ## 0.8.1
 
 ### Fixed
-- **Android: fixed a major scroll/rendering performance regression** introduced by the transparent-background fix in a previous release. When `transparentBackground: true` was set, the WebView could get stuck permanently in `LAYER_TYPE_SOFTWARE` (CPU rendering) instead of switching back to `LAYER_TYPE_HARDWARE` after the page finished loading, causing persistent jank during scrolling and animations. The hardware layer switch is now only delayed by a couple of frames after `onPageFinished` (enough to avoid the black-flash artifact on the first transparent composite), then restored as before.
-- **Android: initial layer type is no longer forced to `LAYER_TYPE_SOFTWARE` at WebView creation** for opaque backgrounds, avoiding an unnecessary software-rendered frame before the first hardware composite.
-- **Android: fixed unnecessary `WindowInsets` rebuild/redispatch on every touch interaction** when `disableKeyboardResize: true` is set. The listener now only rebuilds and redispatches insets when the IME inset is actually non-zero, instead of doing so unconditionally — this was causing the engine to resend viewport metrics on every tap, adding visible input latency between touch and render.
+* **Android: fixed a major scroll/rendering performance regression** introduced by the transparent-background fix in a previous release. When `transparentBackground: true` was set, the WebView could get stuck permanently in `LAYER_TYPE_SOFTWARE` (CPU rendering) instead of switching back to `LAYER_TYPE_HARDWARE` after the page finished loading, causing persistent jank during scrolling and animations. The hardware layer switch is now only delayed by a couple of frames after `onPageFinished` (enough to avoid the black-flash artifact on the first transparent composite), then restored as before.
+* **Android: initial layer type is no longer forced to `LAYER_TYPE_SOFTWARE` at WebView creation** for opaque backgrounds, avoiding an unnecessary software-rendered frame before the first hardware composite.
+* **Android: fixed unnecessary `WindowInsets` rebuild/redispatch on every touch interaction** when `disableKeyboardResize: true` is set. The listener now only rebuilds and redispatches insets when the IME inset is actually non-zero, instead of doing so unconditionally — this was causing the engine to resend viewport metrics on every tap, adding visible input latency between touch and render.
 
 ## 0.8.0
 

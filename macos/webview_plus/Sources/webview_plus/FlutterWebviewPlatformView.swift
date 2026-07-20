@@ -101,12 +101,6 @@ class WebviewPlusPlatformView: WKWebView {
         configuration.mediaTypesRequiringUserActionForPlayback =
             mediaPlaybackRequiresUserGesture ? .all : []
 
-        // "Picture in picture" (macOS ne force jamais le plein écran comme
-        // iOS peut le faire, donc pas d'équivalent `allowsInlineMediaPlayback`
-        // à poser ici).
-        configuration.allowsPictureInPictureMediaPlayback =
-            (settings?["allowsPictureInPicture"] as? Bool) ?? true
-
         // Pas de désactivation directe du DOM storage sur WKWebView ; on
         // utilise un websiteDataStore non-persistant en approximation quand
         // `domStorageEnabled == false` ou `incognito == true` (données en
