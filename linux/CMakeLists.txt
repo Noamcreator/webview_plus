@@ -22,7 +22,7 @@ pkg_check_modules(WEBKIT REQUIRED IMPORTED_TARGET webkit2gtk-4.1)
 list(APPEND PLUGIN_SOURCES
   "webview_plus_plugin.cc"
   "common/method_channel_utils.cc"
-  "platform/flutter_view.cc"
+  "rendering/texture_bridge_linux.cc"
   "webview/linux_webview.cc"
   "webview/webview_method_handler.cc"
 )

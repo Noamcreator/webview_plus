@@ -67,7 +67,6 @@ static void webview_plus_plugin_class_init(WebviewPlusPluginClass* klass) {
 }
 
 static void webview_plus_plugin_init(WebviewPlusPlugin* self) {
-  self->overlay = nullptr;
   // Clé = gint64* (viewId choisi côté Dart, cf. webview_plus_widget.dart),
   // valeur détruite via `destroy_linux_webview` lorsqu'elle est retirée de
   // la table (dispose explicite ou destruction du plugin).

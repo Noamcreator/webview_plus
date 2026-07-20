@@ -1,6 +1,6 @@
 PODS:
   - FlutterMacOS (1.0.0)
-  - webview_plus (0.8.1):
+  - webview_plus (0.8.2):
     - FlutterMacOS
 
 DEPENDENCIES:

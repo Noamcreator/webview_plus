@@ -276,15 +276,46 @@ static gboolean load_failed_cb(WebKitWebView *widget,
 //
 // Les entrées de menu personnalisées (`ContextMenuItem`) et la
 // désactivation individuelle des entrées par défaut
-// (`disabledDefaultContextMenuItems`) sont réservées à Android/iOS : sur
-// desktop, le clic droit ouvre le menu contextuel classique du navigateur
-// (pas une barre de sélection tactile), donc ce plugin se contente ici de
-// masquer entièrement le menu ou de bloquer les liens, comme avant.
+// (`disabledDefaultContextMenuItems`) sont réservées à Android/iOS.
+//
+// IMPORTANT (mode texture) : le menu contextuel de WebKitGTK est une vraie
+// fenêtre GTK, positionnée en coordonnées ÉCRAN ABSOLUES à partir de
+// l'événement d'origine. Or `web_view` est désormais hébergé dans une
+// fenêtre hôte hors écran (voir `rendering/texture_bridge_linux.h`,
+// coordonnées ~(-10000,-10000)) : sa position ne peut donc structurellement
+// jamais correspondre à l'endroit où l'utilisateur voit réellement la
+// Webview dans l'arbre Flutter (d'où le menu qui apparaît ailleurs sur
+// l'écran, ex. en haut à gauche). Il n'y a pas de correctif propre sans
+// reconstruire un menu contextuel côté Flutter (en interceptant les
+// éléments via `webkit_context_menu_get_item_at_position` et en les
+// renvoyant à Dart pour affichage) — hors périmètre de ce correctif. En
+// attendant, on le supprime donc systématiquement plutôt que de l'afficher
+// au mauvais endroit.
 static gboolean context_menu_cb(WebKitWebView *web_view,
                                 WebKitContextMenu *context_menu,
                                 GdkEvent *event,
                                 WebKitHitTestResult *hit_test_result,
                                 gpointer user_data) {
+  // Voir le commentaire au-dessus de cette fonction : sa position réelle
+  // sur l'écran serait de toute façon incorrecte, donc on le masque
+  // toujours, indépendamment de `disable_context_menu`.
+  (void)web_view;
+  (void)context_menu;
+  (void)event;
+  (void)hit_test_result;
+  (void)user_data;
+  return TRUE;
+}
+
+// Ancienne logique de filtrage fine (désactivation ciblée, retrait de
+// l'entrée "Imprimer"...), conservée mais non appelée tant que le menu
+// natif reste entièrement supprimé ci-dessus. Réutilisable telle quelle
+// le jour où un menu contextuel Flutter custom remplacera l'affichage
+// natif (elle resterait pertinente pour décider QUELS items renvoyer à
+// Dart).
+[[maybe_unused]] static gboolean context_menu_filtering_reference(
+    WebKitWebView *web_view, WebKitContextMenu *context_menu, GdkEvent *event,
+    WebKitHitTestResult *hit_test_result, gpointer user_data) {
   LinuxWebview *webview = static_cast<LinuxWebview *>(user_data);
   if (webview->disable_context_menu) {
     return TRUE;  // Retourner TRUE sans toucher au menu = aucun menu affiché.
@@ -609,13 +640,19 @@ void destroy_linux_webview(gpointer data) {
   }
   if (webview->web_view != nullptr) {
     g_object_set_data(G_OBJECT(webview->web_view), kInstanceKey, nullptr);
-    // `gtk_widget_destroy` détache le widget de son parent (l'overlay) et
-    // libère la référence que le conteneur détenait ; celle prise via
-    // `g_object_ref_sink` à la création (voir `create_linux_webview`)
-    // doit être relâchée séparément ici, sans quoi le WebKitWebView ne
-    // serait jamais finalisé.
+  }
+  if (webview->bridge != nullptr) {
+    // `linux_texture_bridge_free` détruit le GtkOffscreenWindow, ce qui
+    // détruit avec lui `web_view` (parenté dedans) et désenregistre la
+    // texture auprès du moteur Flutter. Remplace l'ancien
+    // `gtk_widget_destroy(webview->web_view)` + `g_object_unref` d'avant le
+    // passage en texture, où `web_view` était directement enfant du
+    // GtkOverlay superposant la Webview à la vue Flutter.
+    linux_texture_bridge_stop(webview->bridge);
+    linux_texture_bridge_free(webview->bridge);
+    webview->bridge = nullptr;
+  } else if (webview->web_view != nullptr) {
     gtk_widget_destroy(GTK_WIDGET(webview->web_view));
-    g_object_unref(webview->web_view);
   }
   g_clear_object(&webview->channel);
   g_clear_object(&webview->content_manager);
@@ -626,11 +663,6 @@ void destroy_linux_webview(gpointer data) {
 
 LinuxWebview *create_linux_webview(WebviewPlusPlugin *self, gint64 view_id,
                                    FlValue *creation_params) {
-  GtkOverlay *overlay = ensure_overlay(self);
-  if (overlay == nullptr) {
-    return nullptr;
-  }
-
   LinuxWebview *webview = g_new0(LinuxWebview, 1);
   webview->plugin = self;
   webview->view_id = view_id;
@@ -638,7 +670,11 @@ LinuxWebview *create_linux_webview(WebviewPlusPlugin *self, gint64 view_id,
   webview->web_view = WEBKIT_WEB_VIEW(
       webkit_web_view_new_with_user_content_manager(webview->content_manager));
   g_object_set_data(G_OBJECT(webview->web_view), kInstanceKey, webview);
-  g_object_ref_sink(webview->web_view);
+  // Pas de `g_object_ref_sink` ici : à la différence de l'ancienne
+  // implémentation (widget flottant jusqu'à son ajout dans le GtkOverlay),
+  // `web_view` est parenté immédiatement plus bas par
+  // `linux_texture_bridge_new` (dans un GtkOffscreenWindow), ce qui prend
+  // déjà possession de sa référence flottante initiale.
 
   g_autofree gchar *channel_name = g_strdup_printf("webview_plus_%" G_GINT64_FORMAT, view_id);
   webview->channel = fl_method_channel_new(
@@ -650,6 +686,17 @@ LinuxWebview *create_linux_webview(WebviewPlusPlugin *self, gint64 view_id,
   FlValue *settings = map_lookup(creation_params, "initialSettings");
 
   WebKitSettings *webkit_settings = webkit_web_view_get_settings(webview->web_view);
+  // Indispensable en mode texture/offscreen : le compositeur accéléré de
+  // WebKitGTK (EGL/GLX) a besoin d'une vraie fenêtre X11 native pour créer
+  // sa surface GL. Le GtkOffscreenWindow qui héberge `web_view` (voir
+  // `linux_texture_bridge_new`) fournit une GdkWindow de type
+  // GDK_WINDOW_OFFSCREEN, pas une fenêtre X11 native — d'où les
+  // avertissements "drawable is not a native X11 window" / assertions
+  // GDK_IS_WINDOW si on laisse l'accélération matérielle active. En la
+  // désactivant, WebKitGTK bascule sur un rendu logiciel (Cairo), qui n'a
+  // pas cette contrainte et fonctionne correctement dans un offscreen.
+  webkit_settings_set_hardware_acceleration_policy(
+      webkit_settings, WEBKIT_HARDWARE_ACCELERATION_POLICY_NEVER);
   webkit_settings_set_enable_javascript(
       webkit_settings, map_lookup_bool(settings, "javaScriptEnabled", TRUE));
   if (const gchar *user_agent = map_lookup_string(settings, "userAgent")) {
@@ -748,18 +795,24 @@ LinuxWebview *create_linux_webview(WebviewPlusPlugin *self, gint64 view_id,
   g_signal_connect(webview->web_view, "print",
                    G_CALLBACK(print_requested_cb), webview);
 
-  gtk_widget_set_halign(GTK_WIDGET(webview->web_view), GTK_ALIGN_START);
-  gtk_widget_set_valign(GTK_WIDGET(webview->web_view), GTK_ALIGN_START);
-  gtk_widget_set_hexpand(GTK_WIDGET(webview->web_view), FALSE);
-  gtk_widget_set_vexpand(GTK_WIDGET(webview->web_view), FALSE);
   gtk_widget_set_can_focus(GTK_WIDGET(webview->web_view), TRUE);
-  gtk_widget_set_size_request(GTK_WIDGET(webview->web_view), 1, 1);
-  gtk_widget_hide(GTK_WIDGET(webview->web_view));
-  gtk_overlay_add_overlay(overlay, GTK_WIDGET(webview->web_view));
-  gtk_overlay_set_overlay_pass_through(overlay, GTK_WIDGET(webview->web_view),
-                                       FALSE);
-  gtk_widget_show(GTK_WIDGET(webview->web_view));
-  gtk_widget_hide(GTK_WIDGET(webview->web_view));
+
+  // Héberge `web_view` hors écran et le republie comme texture Flutter (voir
+  // `rendering/texture_bridge_linux.h`) au lieu de le superposer en widget
+  // GTK natif au-dessus de la FlView (ancien `gtk_overlay_add_overlay`, qui
+  // restait toujours peint au-dessus de tout le contenu Flutter, y compris
+  // les dialogs). `linux_texture_bridge_new` parente immédiatement
+  // `web_view` dans son GtkOffscreenWindow interne.
+  webview->bridge = linux_texture_bridge_new(
+      fl_plugin_registrar_get_texture_registrar(self->registrar),
+      webview->web_view);
+  webview->texture_id = linux_texture_bridge_start(webview->bridge);
+  // Taille de départ raisonnable ; `setSize` (voir `root_method_call_cb`)
+  // la mettra à jour dès que Dart connaît la taille réelle du widget
+  // `Texture` dans l'arbre Flutter.
+  webview->frame_width = 1;
+  webview->frame_height = 1;
+  linux_texture_bridge_resize(webview->bridge, 1, 1);
 
   const gchar *initial_asset = map_lookup_string(creation_params, "initialAsset");
   const gchar *initial_file = map_lookup_string(creation_params, "initialFile");
@@ -823,7 +876,14 @@ void root_method_call_cb(FlMethodChannel *channel, FlMethodCall *method_call,
                              "Flutter n'est pas encore disponible."));
       return;
     }
-    respond(method_call, success_response());
+    // Réponse alignée sur celle du plugin Windows (`{"textureId": ...}`,
+    // voir `windows/webview_plus_plugin.cpp`) : côté Dart, `_initLinuxWebview`
+    // lit ce champ pour construire un widget `Texture`, exactement comme
+    // `_initWindowsWebview` le fait déjà.
+    g_autoptr(FlValue) response = fl_value_new_map();
+    fl_value_set_string_take(response, "textureId",
+                             fl_value_new_int(webview->texture_id));
+    respond(method_call, success_response(response));
     return;
   }
 
@@ -833,33 +893,79 @@ void root_method_call_cb(FlMethodChannel *channel, FlMethodCall *method_call,
                                              g_hash_table_lookup(self->webviews, &lookup_key))
                                        : nullptr;
 
-  if (strcmp(method, "setFrame") == 0) {
-    if (webview == nullptr) {
-      respond(method_call, success_response());  // vue déjà détruite : no-op
-      return;
-    }
-    GtkWidget *widget = GTK_WIDGET(webview->web_view);
-    const double x = map_lookup_double(args, "x", 0);
-    const double y = map_lookup_double(args, "y", 0);
+  if (webview == nullptr) {
+    // Vue déjà détruite (ou jamais créée) : no-op silencieux pour toutes
+    // les méthodes d'instance ci-dessous, à l'image du comportement
+    // précédent de `setFrame` dans ce cas.
+    respond(method_call, success_response());
+    return;
+  }
+
+  if (strcmp(method, "setSize") == 0) {
+    // Remplace l'ancien `setFrame` (x/y/width/height/visible, utilisé pour
+    // positionner le widget GTK au-dessus de la FlView). En mode texture,
+    // Flutter positionne lui-même le widget `Texture` dans son propre
+    // arbre de rendu : on n'a plus qu'à redimensionner le buffer hors
+    // écran pour qu'il corresponde à la taille d'affichage réelle (voir
+    // `_reportLinuxSurfaceSize` côté Dart, calqué sur
+    // `_reportWindowsSurfaceSize`).
     const double width = map_lookup_double(args, "width", 0);
     const double height = map_lookup_double(args, "height", 0);
-    webview->frame_x = static_cast<gint>(x);
-    webview->frame_y = static_cast<gint>(y);
-    webview->frame_width = width > 0 ? static_cast<gint>(width) : 0;
-    webview->frame_height = height > 0 ? static_cast<gint>(height) : 0;
-    webview->visible = map_lookup_bool(args, "visible", TRUE) &&
-                       webview->frame_width > 0 && webview->frame_height > 0;
-
-    gtk_widget_set_margin_start(widget, webview->frame_x);
-    gtk_widget_set_margin_top(widget, webview->frame_y);
-    gtk_widget_set_size_request(widget, webview->frame_width,
-                                webview->frame_height);
-    if (webview->visible) {
-      gtk_widget_show(widget);
-    } else {
-      gtk_widget_hide(widget);
+    const double scale_factor = map_lookup_double(args, "scaleFactor", 1.0);
+    const gint pixel_width =
+        static_cast<gint>(width * (scale_factor > 0 ? scale_factor : 1.0));
+    const gint pixel_height =
+        static_cast<gint>(height * (scale_factor > 0 ? scale_factor : 1.0));
+    if (pixel_width > 0 && pixel_height > 0) {
+      webview->frame_width = pixel_width;
+      webview->frame_height = pixel_height;
+      linux_texture_bridge_resize(webview->bridge, pixel_width, pixel_height);
     }
-    update_flutter_view_input_region(self);
+    respond(method_call, success_response());
+    return;
+  }
+
+  if (strcmp(method, "setCursorPos") == 0) {
+    const double x = map_lookup_double(args, "x", 0);
+    const double y = map_lookup_double(args, "y", 0);
+    webview->last_pointer_x = x;
+    webview->last_pointer_y = y;
+    linux_texture_bridge_dispatch_pointer(webview->bridge, GDK_MOTION_NOTIFY, x,
+                                         y, 0, 0, 0);
+    respond(method_call, success_response());
+    return;
+  }
+
+  if (strcmp(method, "setPointerButton") == 0) {
+    const gint64 button = map_lookup_int(args, "button", 1);
+    const gboolean is_down = map_lookup_bool(args, "isDown", TRUE);
+    linux_texture_bridge_dispatch_pointer(
+        webview->bridge, is_down ? GDK_BUTTON_PRESS : GDK_BUTTON_RELEASE,
+        webview->last_pointer_x, webview->last_pointer_y,
+        static_cast<guint>(button), 0, 0);
+    respond(method_call, success_response());
+    return;
+  }
+
+  if (strcmp(method, "setScrollDelta") == 0) {
+    const double dx = map_lookup_double(args, "dx", 0);
+    const double dy = map_lookup_double(args, "dy", 0);
+    linux_texture_bridge_dispatch_pointer(webview->bridge, GDK_SCROLL,
+                                         webview->last_pointer_x,
+                                         webview->last_pointer_y, 0, dx, dy);
+    respond(method_call, success_response());
+    return;
+  }
+
+  if (strcmp(method, "sendKeyEvent") == 0) {
+    const gint64 keyval = map_lookup_int(args, "keyval", 0);
+    const gint64 state = map_lookup_int(args, "state", 0);
+    const gint64 hardware_keycode = map_lookup_int(args, "hardwareKeycode", 0);
+    const gboolean is_down = map_lookup_bool(args, "isDown", TRUE);
+    linux_texture_bridge_dispatch_key(
+        webview->bridge, is_down ? GDK_KEY_PRESS : GDK_KEY_RELEASE,
+        static_cast<guint>(keyval), static_cast<guint>(state),
+        static_cast<guint16>(hardware_keycode));
     respond(method_call, success_response());
     return;
   }
@@ -868,7 +974,6 @@ void root_method_call_cb(FlMethodChannel *channel, FlMethodCall *method_call,
     if (webview != nullptr) {
       gint64 key_copy = view_id;
       g_hash_table_remove(self->webviews, &key_copy);  // -> destroy_linux_webview
-      update_flutter_view_input_region(self);
     }
     respond(method_call, success_response());
     return;

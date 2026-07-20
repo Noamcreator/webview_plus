@@ -1,3 +1,12 @@
+## 0.8.2
+
+### Fixed
+- **Linux: fixed a critical bug where opening a `WebviewWidget` could corrupt the Flutter engine's OpenGL rendering context**, breaking rendering across the *entire* app — not just the webview. Depending on timing, this ranged from a black band covering all Flutter widgets to a complete engine failure (`FlutterEngineRunTask` repeatedly returning `kInvalidArguments`, nothing rendering at all). Root cause: the plugin reparented the Flutter `FlView` into a new `GtkOverlay` *after* the engine had already bound its GL resource context to the view's original `GdkWindow`; tearing that window down and rebuilding it mid-session invalidated the context.
+
+### Changed — action required on Linux
+- **The `GtkOverlay` used to host native Webviews must now be created up front in `linux/my_application.cc`, before the engine starts rendering**, instead of being assembled at runtime by the plugin. This is what actually fixes the bug above. See the new **[Setup on Linux](README.md#setup-on-linux)** section for the exact snippet to add.
+- The plugin's previous runtime fallback (reparenting the `FlView` on first Webview creation) is kept only as a safety net for projects that haven't applied this change yet, and is no longer the recommended path — it remains susceptible to the rendering bug described above.
+
 ## 0.8.1
 
 ### Fixed
@@ -111,4 +120,3 @@ Android changes:
 ## 0.1.0
 
 * Initial Commit
-  
