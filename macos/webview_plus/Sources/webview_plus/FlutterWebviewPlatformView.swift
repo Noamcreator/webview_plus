@@ -1044,13 +1044,44 @@ class WebviewPlusResourceSchemeHandler: NSObject, WKURLSchemeHandler {
     private func getMimeType(for url: URL) -> String {
         let pathExtension = url.pathExtension.lowercased()
         switch pathExtension {
-        case "jpg", "jpeg": return "image/jpeg"
-        case "png": return "image/png"
-        case "gif": return "image/gif"
-        case "webp": return "image/webp"
-        case "css": return "text/css"
-        case "js": return "application/javascript"
-        default: return "application/octet-stream"
+            // Images
+            case "jpg", "jpeg": return "image/jpeg"
+            case "png": return "image/png"
+            case "gif": return "image/gif"
+            case "webp": return "image/webp"
+            case "svg": return "image/svg+xml"
+            case "ico": return "image/x-icon"
+            case "bmp": return "image/bmp"
+            case "tiff", "tif": return "image/tiff"
+            
+            // Web (Code & Contenu)
+            case "html", "htm": return "text/html"
+            case "css": return "text/css"
+            case "js", "mjs": return "application/javascript"
+            case "json": return "application/json"
+            case "xml": return "application/xml"
+            case "txt": return "text/plain"
+            
+            // Polices (Fonts)
+            case "woff": return "font/woff"
+            case "woff2": return "font/woff2"
+            case "ttf": return "font/ttf"
+            case "otf": return "font/otf"
+            
+            // Audio & Vidéo
+            case "mp4": return "video/mp4"
+            case "webm": return "video/webm"
+            case "ogv": return "video/ogg"
+            case "mp3": return "audio/mpeg"
+            case "wav": return "audio/wav"
+            case "ogg", "oga": return "audio/ogg"
+            case "aac": return "audio/aac"
+            
+            // Documents & Archives
+            case "pdf": return "application/pdf"
+            case "zip": return "application/zip"
+            
+            default: return "application/octet-stream"
         }
     }
 }

@@ -1,3 +1,13 @@
+## 0.8.5
+
+* **Added SVG Support:** Registered the `"image/svg+xml"` MIME type for `.svg` extensions. This prevents `WKWebView` from treating SVGs as raw binary streams (`application/octet-stream`), allowing them to render correctly inside HTML `<img>` elements.
+* **Expanded Media & Web Formats:** Added comprehensive mapping for web apps and publications:
+  * **Images:** `.webp`, `.ico`, `.bmp`, `.gif`, `.tiff`
+  * **Fonts:** `.woff`, `.woff2`, `.ttf`, `.otf`
+  * **Web/Data:** `.html`, `.json`, `.xml`, `.txt`, `.mjs`
+  * **Audio/Video:** `.mp4`, `.webm`, `.mp3`, `.wav`, `.aac`, `.ogg`
+  * **Documents:** `.pdf`, `.zip`
+
 ## 0.8.4
 
 * **Custom URL Scheme (`app-assets://`)**: Introduced a custom URL scheme handler (`WKURLSchemeHandler`) to safely intercept local asset requests without conflicting with WebKit's security policies.
