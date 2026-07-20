@@ -91,9 +91,14 @@ class WebviewPlusPlatformView: WKWebView {
         configuration.setURLSchemeHandler(resourceHandler, forURLScheme: "app-assets")
 
         let settings = creationParams?["initialSettings"] as? [String: Any?]
-
-        configuration.preferences.javaScriptEnabled =
-            (settings?["javaScriptEnabled"] as? Bool) ?? true
+        
+        let jsEnabled = (settings?["javaScriptEnabled"] as? Bool) ?? true
+        if #available(macOS 11.0, *) {
+            configuration.defaultWebpagePreferences.allowsContentJavaScript = jsEnabled
+        } else {
+            // Rétrocompatibilité si jamais ton app cible encore des versions très anciennes
+            configuration.preferences.javaScriptEnabled = jsEnabled
+        }
 
         configuration.preferences.javaScriptCanOpenWindowsAutomatically =
             (settings?["javaScriptCanOpenWindowsAutomatically"] as? Bool) ?? false

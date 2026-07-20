@@ -1,3 +1,7 @@
+## 0.8.6
+
+* Fixed a deprecation warning by replacing `configuration.preferences.javaScriptEnabled` with `configuration.defaultWebpagePreferences.allowsContentJavaScript` for macOS 11.0 and later.
+
 ## 0.8.5
 
 * **Added SVG Support:** Registered the `"image/svg+xml"` MIME type for `.svg` extensions. This prevents `WKWebView` from treating SVGs as raw binary streams (`application/octet-stream`), allowing them to render correctly inside HTML `<img>` elements.
