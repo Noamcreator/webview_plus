@@ -1,3 +1,7 @@
+import 'dart:io'; // AJOUTÉ pour manipuler les fichiers locaux
+import 'package:flutter/services.dart'; // AJOUTÉ pour lire les assets de l'application
+import 'package:path/path.dart' as p; // AJOUTÉ pour manipuler les chemins
+import 'package:path_provider/path_provider.dart'; // AJOUTÉ pour récupérer le dossier de l'app
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:webview_plus/webview_plus.dart';
@@ -78,6 +82,7 @@ class _WebviewDemoPageState extends State<WebviewDemoPage>
   String _status = 'Inactif';
   bool _isLoading = false;
   final List<String> _log = <String>[];
+  String _localImagePath = ''; // AJOUTÉ pour stocker l'URL du fichier copié
 
   // -- Général (toutes plateformes) ----------------------------------------
   bool _javaScriptEnabled = true;
@@ -126,8 +131,8 @@ class _WebviewDemoPageState extends State<WebviewDemoPage>
   bool _bounces = true;
   bool _allowsBackForwardNavigationGestures = false;
   bool _allowsLinkPreview = false;
-  bool _allowFileAccessFromFileURLs = false;
-  bool _allowUniversalAccessFromFileURLs = false;
+  bool _allowFileAccessFromFileURLs = true; // CHANGÉ À TRUE pour autoriser les images locales en file://
+  bool _allowUniversalAccessFromFileURLs = true; // CHANGÉ À TRUE pour autoriser l'accès aux fichiers
 
   // -- Scrollbars (Windows / macOS / Linux) -----------------------------------
   DesktopScrollbarThemeMode _scrollbarThemeMode = DesktopScrollbarThemeMode.auto;
@@ -140,6 +145,34 @@ class _WebviewDemoPageState extends State<WebviewDemoPage>
   bool _cacheActionInProgress = false;
 
   int _webviewGeneration = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _prepareLocalImage(); // AJOUTÉ : Copie de l'image dès le chargement du widget
+  }
+
+  /// AJOUTÉ : Cette fonction extrait image.jpg des assets et l'écrit dans le dossier de l'app
+  Future<void> _prepareLocalImage() async {
+    try {
+      final directory = await getApplicationDocumentsDirectory();
+      final filePath = p.join(directory.path, 'image.jpg');
+      final file = File(filePath);
+
+      // Charge le fichier depuis les assets et l'écrit en local
+      final ByteData data = await rootBundle.load('assets/image.jpg');
+      final List<int> bytes = data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes);
+      await file.writeAsBytes(bytes);
+
+      setState(() {
+        // Pour les WebViews, il faut utiliser le préfixe file://
+        _localImagePath = file.uri.toString(); 
+      });
+      _pushLog('Asset copié avec succès dans le dossier de l\'application : $filePath');
+    } catch (e) {
+      _pushLog('Erreur lors de la copie de l\'asset : $e');
+    }
+  }
 
   void _pushLog(String line) {
     if (!mounted) return; // Sécurité si le widget est détruit entre-temps
@@ -308,16 +341,44 @@ class _WebviewDemoPageState extends State<WebviewDemoPage>
     await _controller?.loadFlutterAsset('assets/index.html');
   }
 
+  // MODIFIÉ : Injecte le HTML brut en intégrant l'image locale copiée
   Future<void> _loadRawData() async {
+    // Imaginons que votre chemin d'image local soit : "file:///var/folders/.../image.jpg"
+    // ou simplement un chemin brut sans protocole.
+    String baseImagePath = _localImagePath; 
+
+    // Sécurité : On s'assure que le préfixe file:// est bien remplacé par app-assets://
+    String customImageUrl;
+    if (baseImagePath.startsWith('file://')) {
+      customImageUrl = baseImagePath.replaceFirst('file://', 'app-assets://');
+    } else {
+      customImageUrl = 'app-assets://$baseImagePath';
+    }
+
+    // Votre code HTML mis à jour avec le bon schéma d'URL
+    String htmlContent = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="utf-8">
+        <title>Test Affichage Image</title>
+        <style>
+            body { font-family: sans-serif; text-align: center; padding: 20px; }
+            img { max-width: 100%; height: auto; border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.1); }
+        </style>
+    </head>
+    <body>
+        <h1>Test Image Locale</h1>
+        <p>Cette image est interceptée par le code natif grâce au schéma personnalisé.</p>
+        
+        <!-- L'URL utilise app-assets:// au lieu de file:// -->
+        <img src="$customImageUrl" alt="Image locale chargée via app-assets" /> 
+    </body>
+    </html>
+    """;
+
     await _controller?.loadData(
-      '''
-      <html>
-        <body style="font-family: sans-serif; padding: 24px;">
-          <h1>Chargé via loadData()</h1>
-          <p>Ceci est du HTML brut injecté directement, sans passer par une URL.</p>
-        </body>
-      </html>
-      ''',
+      htmlContent,
       mimeType: 'text/html',
       encoding: 'utf8',
     );
@@ -610,6 +671,22 @@ class _WebviewDemoPageState extends State<WebviewDemoPage>
                     debugPrint('WEBVIEW LOADING onDOMContentLoaded $time $url');
                   }
                   setState(() => _status = 'DOM chargé');
+                },
+                onFontsIsLoaded: (controller, loadedFontFamilies) {
+                  for(String font in loadedFontFamilies) {
+                    if (kDebugMode) {
+                      print(font);
+                    }
+                  }
+                },
+                onLoadResource: (controller, url , data) async {
+                  if (kDebugMode) {
+                    print('url: $url');
+                    print('data: $data');
+                  }
+
+                  // L'application attendra que cette ligne soit atteinte avant de continuer côté Swift !
+                  return null;
                 },
                 onReceivedError: (controller, url, code, description) {
                   setState(() {
@@ -1365,8 +1442,6 @@ class _WebviewDemoPageState extends State<WebviewDemoPage>
 // Widgets utilitaires
 // ============================================================================
 
-/// Puce arrondie affichant le statut courant, avec un petit spinner pendant
-/// le chargement.
 class _StatusChip extends StatelessWidget {
   const _StatusChip({required this.isLoading, required this.status});
 
@@ -1404,8 +1479,6 @@ class _StatusChip extends StatelessWidget {
   }
 }
 
-/// Carte avec icône + titre (+ sous-titre optionnel) utilisée dans l'onglet
-/// "Actions" et "Cache & Debug".
 class _CardSection extends StatelessWidget {
   const _CardSection({
     required this.icon,
@@ -1450,9 +1523,6 @@ class _CardSection extends StatelessWidget {
   }
 }
 
-/// Groupe de réglages repliable utilisé dans l'onglet "Réglages", pour éviter
-/// un mur de switches et laisser l'utilisateur se concentrer sur une
-/// catégorie/plateforme à la fois.
 class _SettingsGroup extends StatelessWidget {
   const _SettingsGroup({
     required this.icon,
@@ -1485,7 +1555,6 @@ class _SettingsGroup extends StatelessWidget {
   }
 }
 
-/// Pastille de couleur cliquable utilisée dans le sélecteur [_pickColor].
 class _ColorSwatch extends StatelessWidget {
   const _ColorSwatch({required this.color, required this.selected, required this.onTap});
 

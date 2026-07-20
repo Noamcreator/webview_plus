@@ -12,6 +12,7 @@ dependencies:
   webview_plus:
     path: ../
 
+  path_provider: ^2.1.6
 
 dev_dependencies:
   integration_test:
@@ -24,3 +25,4 @@ flutter:
   uses-material-design: true
   assets:
     - assets/index.html
+    - assets/image.jpg

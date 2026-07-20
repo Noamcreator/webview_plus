@@ -85,6 +85,11 @@ class WebviewPlusPlatformView: WKWebView {
         let userContentController = WKUserContentController()
         configuration.userContentController = userContentController
 
+        let resourceHandler = WebviewPlusResourceSchemeHandler()
+
+        // On enregistre officiellement notre schéma personnalisé
+        configuration.setURLSchemeHandler(resourceHandler, forURLScheme: "app-assets")
+
         let settings = creationParams?["initialSettings"] as? [String: Any?]
 
         configuration.preferences.javaScriptEnabled =
@@ -981,5 +986,71 @@ enum JsonLiteral {
         }
         out += "\""
         return out
+    }
+}
+
+/// Intercepte les requêtes réseau en tâche de fond pour notifier Dart (Base64) 
+/// sans altérer le cycle de rendu de la page.
+class WebviewPlusResourceSchemeHandler: NSObject, WKURLSchemeHandler {
+    
+    func webView(_ webView: WKWebView, start urlSchemeTask: WKURLSchemeTask) {
+        guard let url = urlSchemeTask.request.url else {
+            urlSchemeTask.didFailWithError(NSError(domain: NSCocoaErrorDomain, code: NSURLErrorBadURL, userInfo: nil))
+            return
+        }
+        
+        // Si l'URL utilise notre schéma personnalisé
+        if url.scheme == "app-assets" {
+            // On reconstruit l'URL au format file:// pour pouvoir lire le fichier sur le disque
+            var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+            components?.scheme = "file"
+            
+            if let fileUrl = components?.url {
+                let filePath = fileUrl.path
+                
+                if FileManager.default.fileExists(atPath: filePath) {
+                    // C'EST ICI que votre événement onLoadResource peut être notifié à Dart si besoin !
+                    
+                    // On détermine le type MIME (Optionnel mais recommandé pour les images)
+                    let mimeType = getMimeType(for: fileUrl)
+                    
+                    if let data = try? Data(contentsOf: fileUrl) {
+                        let response = URLResponse(
+                            url: url,
+                            mimeType: mimeType,
+                            expectedContentLength: data.count,
+                            textEncodingName: nil
+                        )
+                        
+                        // On renvoie les données à la WebView
+                        urlSchemeTask.didReceive(response)
+                        urlSchemeTask.didReceive(data)
+                        urlSchemeTask.didFinish()
+                        return
+                    }
+                }
+            }
+        }
+        
+        // Si le fichier n'existe pas ou n'a pas pu être lu
+        urlSchemeTask.didFailWithError(NSError(domain: NSCocoaErrorDomain, code: NSFileReadNoSuchFileError, userInfo: nil))
+    }
+    
+    func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {
+        // Logique d'arrêt si la requête est annulée par la WebView
+    }
+    
+    // Fonction utilitaire pour obtenir le MimeType d'un fichier (ex: image/jpeg)
+    private func getMimeType(for url: URL) -> String {
+        let pathExtension = url.pathExtension.lowercased()
+        switch pathExtension {
+        case "jpg", "jpeg": return "image/jpeg"
+        case "png": return "image/png"
+        case "gif": return "image/gif"
+        case "webp": return "image/webp"
+        case "css": return "text/css"
+        case "js": return "application/javascript"
+        default: return "application/octet-stream"
+        }
     }
 }

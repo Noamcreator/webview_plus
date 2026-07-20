@@ -1,3 +1,16 @@
+## 0.8.4
+
+* **Custom URL Scheme (`app-assets://`)**: Introduced a custom URL scheme handler (`WKURLSchemeHandler`) to safely intercept local asset requests without conflicting with WebKit's security policies.
+* **MIME Type Resolver**: Added a helper function (`getMimeType`) in the Swift handler to map file extensions (such as `.jpg`, `.png`, `.css`, `.js`) to their respective MIME types, ensuring the WebView correctly renders the intercepted resources.
+
+## [Changed]
+* **Native URL Scheme Registration**: Replaced the private, non-functional `_setURLSchemeHandler:forURLScheme:` method (which attempted to override `http`/`https`) with the official `setURLSchemeHandler(_:forURLScheme:)` method targeting the new `app-assets` scheme.
+* **Dart HTML Resource Paths**: Updated the local image path conversion in the Flutter layer to replace the restricted `file://` protocol with the new custom `app-assets://` prefix.
+* **Resource Loading Logic**: Rewrote the Swift resource handler to capture `app-assets://` URIs, dynamically convert them back to local file system paths (`file://`), read the data securely from the disk, and stream it back to the `WKWebView`.
+
+## [Fixed]
+* **`onLoadResource` Silent Failures**: Fixed a limitation where `WKWebView` silently ignored or blocked custom scheme handlers bound to standard web protocols (`http`, `https`, `file`), preventing resource interception events from triggering.
+
 ## 0.8.3
 
 * Remove the "Picture in picture" in macOS to remove the build failed.

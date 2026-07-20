@@ -140,6 +140,14 @@ typedef WebviewFontsLoadedCallback = void Function(
   List<String> loadedFontFamilies,
 );
 
+/// Callback appelé lorsqu'une ressource (image, etc.) se charge.
+/// Contient l'URL de la ressource et les données en base64 (si décodées côté natif).
+typedef WebviewLoadResourceCallback = Future<String?> Function(
+  WebviewPlusController controller,
+  String url,
+  Uint8List data,
+);
+
 /// Contrôleur permettant de piloter une instance de Webview native
 /// (Android, iOS, macOS, Windows, Linux) depuis Dart.
 ///
@@ -197,6 +205,7 @@ class WebviewBaseController implements WebviewPlusController {
   WebviewControllerCallback? _onWindowBlur;
   WebviewCursorCallback? _onCursorChanged;
   WebviewFontsLoadedCallback? _onFontsIsLoaded;
+  WebviewLoadResourceCallback? _onLoadResource;
 
   final Map<String, JavaScriptHandlerCallback> _javaScriptHandlers =
       <String, JavaScriptHandlerCallback>{};
@@ -218,6 +227,7 @@ class WebviewBaseController implements WebviewPlusController {
     WebviewControllerCallback? onWindowBlur,
     WebviewCursorCallback? onCursorChanged,
     WebviewFontsLoadedCallback? onFontsIsLoaded,
+    WebviewLoadResourceCallback? onLoadResource,
     List<ContextMenuItem> contextMenuItems = const <ContextMenuItem>[],
   }) {
     final channel = MethodChannel('webview_plus_$viewId');
@@ -231,7 +241,8 @@ class WebviewBaseController implements WebviewPlusController {
       .._onWindowFocus = onWindowFocus
       .._onWindowBlur = onWindowBlur
       .._onCursorChanged = onCursorChanged
-      .._onFontsIsLoaded = onFontsIsLoaded;
+      .._onFontsIsLoaded = onFontsIsLoaded
+      .._onLoadResource = onLoadResource;
     _controller._registerContextMenuActionsLocally(contextMenuItems);
     channel.setMethodCallHandler(_controller._onMethodCall);
     return _controller;
@@ -318,6 +329,23 @@ class WebviewBaseController implements WebviewPlusController {
         }
         _onFontsIsLoaded?.call(_controller, families);
         return null;
+      
+      case 'onLoadResource':
+      final map = Map<String, dynamic>.from(call.arguments as Map);
+      final String url = map['url'] as String? ?? '';
+      final String base64Data = map['data'] as String? ?? '';
+      
+      if (_onLoadResource != null && base64Data.isNotEmpty) {
+        // 1. Décode les données reçues de Swift en Uint8List
+        final Uint8List decodedBytes = base64Decode(base64Data);
+        
+        // 2. ICI : On met le "await" pour attendre la réponse de ton application
+        final String? newBase64 = await _onLoadResource!(_controller, url, decodedBytes);
+        
+        // 3. On renvoie ce résultat directement à Swift
+        return newBase64; 
+      }
+      return null;
 
       case 'onContextMenuAction':
         final map = Map<String, dynamic>.from(call.arguments as Map);
