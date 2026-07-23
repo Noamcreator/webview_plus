@@ -1,5 +1,3 @@
-import 'dart:math' as math;
-
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -153,13 +151,21 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
   MouseCursor _windowsCursor = SystemMouseCursors.basic;
 
   int? _linuxViewId;
+  int? _linuxTextureId;
   bool _linuxInitScheduled = false;
-  bool _linuxCreated = false;
-  Rect _linuxLastRect = Rect.zero;
-  bool _linuxLastVisible = false;
+  bool _linuxReady = false;
 
   final GlobalKey _windowsWidgetKey = GlobalKey();
+  final GlobalKey _linuxWidgetKey = GlobalKey();
   final Map<int, int> _downButtons = <int, int>{};
+
+  // Focus dédié à la Webview Linux : nécessaire pour intercepter les
+  // événements clavier Flutter et les retransmettre synthétiquement au
+  // WebKitWebView hébergé hors écran (voir `sendKeyEvent` /
+  // `linux_texture_bridge_dispatch_key`), qui ne peut structurellement pas
+  // recevoir de vrais événements clavier X11 (fenêtre jamais mappée à
+  // l'écran).
+  final FocusNode _linuxFocusNode = FocusNode(debugLabel: 'webview_plus_linux');
 
   // `true` dès que la création Windows a été lancée une première fois (voir
   // `didChangeDependencies`, qui a besoin du `Theme` ambiant pour résoudre
@@ -342,11 +348,11 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
     super.didChangeMetrics();
     // Filet de sécurité pour Linux : un changement de métriques sans
     // relayout (ex. changement de résolution/échelle) ne déclenche pas
-    // forcément un nouveau `paint()` du sous-arbre ; on republie donc le
-    // dernier rectangle connu par précaution (no-op si rien n'a changé côté
-    // natif).
+    // forcément un nouveau `paint()` du sous-arbre ; on republie donc la
+    // dernière taille connue par précaution (no-op côté natif si rien n'a
+    // changé).
     if (!kIsWeb && defaultTargetPlatform == TargetPlatform.linux) {
-      _pushLinuxFrame(_linuxLastRect, visible: _linuxLastVisible);
+      _reportLinuxSurfaceSize();
     }
   }
 
@@ -404,23 +410,22 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
     }
   }
 
-  /// Contrairement à Android/iOS (Flutter `PlatformView`) et à Windows
-  /// (texture Webview2), Linux ne dispose d'aucune primitive Flutter de
-  /// "vue de plateforme" : le plugin natif (voir `linux/webview/*.cc`)
-  /// positionne directement un `GtkWidget` WebKitGTK au-dessus de la
-  /// fenêtre Flutter, à la position et taille communiquées via `setFrame`
-  /// sur le canal global `plugins.noam.me/webview_plus_linux` — d'où le
-  /// widget géométrique dédié `_LinuxGeometryObserver` plus bas, qui
-  /// recalcule ce rectangle à chaque `paint`.
+  /// Comme Windows, Linux affiche la Webview via une vraie texture Flutter
+  /// (voir `create_linux_webview` / `linux_texture_bridge_*` côté C++) : le
+  /// WebKitWebView tourne dans une fenêtre GTK hors écran dont le contenu
+  /// est capturé et republié comme `FlPixelBufferTexture`. Ceci remplace
+  /// l'ancienne approche (widget GTK superposé en overlay, positionné via
+  /// `setFrame`), qui n'existe plus côté natif.
   Future<void> _initLinuxWebview() async {
     final id = DateTime.now().microsecondsSinceEpoch;
-    _linuxViewId = id;
-    _linuxCreated = false;
-    _linuxLastRect = Rect.zero;
-    _linuxLastVisible = false;
+    setState(() {
+      _linuxViewId = id;
+      _linuxReady = false;
+      _linuxTextureId = null;
+    });
 
     try {
-      await _globalLinuxChannel.invokeMethod('create', {
+      final dynamic result = await _globalLinuxChannel.invokeMethod('create', {
         'viewId': id,
         'initialUrl': widget.initialUrl,
         'initialAsset': widget.initialAsset,
@@ -433,7 +438,9 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
         'scrollbarTheme': _resolveDesktopScrollbarTheme(),
       });
 
-      if (!mounted) return;
+      final Map<dynamic, dynamic> response =
+          Map<dynamic, dynamic>.from(result as Map);
+      final textureId = response['textureId'] as int?;
 
       final controller = WebviewBaseController.init(
         id,
@@ -444,44 +451,154 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
         onDOMContentLoaded: widget.onDOMContentLoaded,
         onReceivedError: widget.onReceivedError,
         onFontsIsLoaded: widget.onFontsIsLoaded,
-        onLoadResource: widget.onLoadResource
+        onLoadResource: widget.onLoadResource,
       );
 
-      setState(() => _linuxCreated = true);
+      if (!mounted) return;
+      setState(() {
+        _linuxTextureId = textureId;
+        _linuxReady = textureId != null;
+      });
       _handleControllerCreated(controller);
-      // Le widget peut déjà avoir été peint (et donc avoir une géométrie
+      // Le widget peut déjà avoir été peint (et donc avoir une taille
       // connue) avant que la création native ne se termine.
-      _pushLinuxFrame(_linuxLastRect, visible: _linuxLastVisible);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _reportLinuxSurfaceSize();
+      });
     } catch (e) {
       debugPrint('Erreur lors de la création de la Webview Linux: $e');
     }
   }
 
-  void _pushLinuxFrame(Rect rect, {required bool visible}) {
-    _linuxLastRect = rect;
-    _linuxLastVisible = visible;
-    final id = _linuxViewId;
-    if (id == null || !_linuxCreated) return;
-    _globalLinuxChannel.invokeMethod('setFrame', {
-      'viewId': id,
-      'x': rect.left,
-      'y': rect.top,
-      'width': rect.width,
-      'height': rect.height,
-      'visible': visible,
+  void _reportLinuxSurfaceSize() {
+    final viewId = _linuxViewId;
+    if (viewId == null || !_linuxReady) return;
+
+    final RenderBox? renderBox =
+        _linuxWidgetKey.currentContext?.findRenderObject() as RenderBox?;
+    if (renderBox == null || !renderBox.hasSize) return;
+
+    final scaleFactor = View.of(context).devicePixelRatio;
+    _globalLinuxChannel.invokeMethod('setSize', {
+      'viewId': viewId,
+      'width': renderBox.size.width,
+      'height': renderBox.size.height,
+      'scaleFactor': scaleFactor,
     });
   }
 
-  void _handleLinuxGeometryChanged(Rect rect) {
-    final bool visible = rect.left.isFinite &&
-        rect.top.isFinite &&
-        rect.width.isFinite &&
-        rect.height.isFinite &&
-        rect.width > 0 &&
-        rect.height > 0;
-    if (_linuxLastVisible != visible || rect != _linuxLastRect) {
-      _pushLinuxFrame(visible ? rect : Rect.zero, visible: visible);
+  // -- Clavier (Linux) ------------------------------------------------
+  //
+  // Le WebKitWebView Linux ne reçoit jamais de vrais événements clavier
+  // X11 (voir le commentaire en tête de `texture_bridge_linux.cc`) : il
+  // faut donc synthétiser un keyval/état GDK à partir de chaque
+  // `KeyEvent` Flutter et l'envoyer via `sendKeyEvent`. Les valeurs
+  // ci-dessous sont les keysyms X11 standard (stables depuis des
+  // décennies, `gdk/gdkkeysyms.h`) pour les touches non imprimables les
+  // plus courantes ; pour les caractères imprimables, on dérive le keyval
+  // directement du code Unicode (convention GDK : identique au point de
+  // code pour le Latin-1, `0x01000000 + point de code` au-delà — voir
+  // `gdk_unicode_to_keyval`).
+  static final Map<LogicalKeyboardKey, int> _gdkNamedKeyvals = {
+    LogicalKeyboardKey.backspace: 0xff08,
+    LogicalKeyboardKey.tab: 0xff09,
+    LogicalKeyboardKey.enter: 0xff0d,
+    LogicalKeyboardKey.numpadEnter: 0xff8d,
+    LogicalKeyboardKey.escape: 0xff1b,
+    LogicalKeyboardKey.space: 0x0020,
+    LogicalKeyboardKey.delete: 0xffff,
+    LogicalKeyboardKey.home: 0xff50,
+    LogicalKeyboardKey.arrowLeft: 0xff51,
+    LogicalKeyboardKey.arrowUp: 0xff52,
+    LogicalKeyboardKey.arrowRight: 0xff53,
+    LogicalKeyboardKey.arrowDown: 0xff54,
+    LogicalKeyboardKey.pageUp: 0xff55,
+    LogicalKeyboardKey.pageDown: 0xff56,
+    LogicalKeyboardKey.end: 0xff57,
+    LogicalKeyboardKey.insert: 0xff63,
+    LogicalKeyboardKey.shiftLeft: 0xffe1,
+    LogicalKeyboardKey.shiftRight: 0xffe2,
+    LogicalKeyboardKey.controlLeft: 0xffe3,
+    LogicalKeyboardKey.controlRight: 0xffe4,
+    LogicalKeyboardKey.capsLock: 0xffe5,
+    LogicalKeyboardKey.altLeft: 0xffe9,
+    LogicalKeyboardKey.altRight: 0xffea,
+    LogicalKeyboardKey.metaLeft: 0xffeb,
+    LogicalKeyboardKey.metaRight: 0xffec,
+    LogicalKeyboardKey.contextMenu: 0xff67,
+    LogicalKeyboardKey.f1: 0xffbe,
+    LogicalKeyboardKey.f2: 0xffbf,
+    LogicalKeyboardKey.f3: 0xffc0,
+    LogicalKeyboardKey.f4: 0xffc1,
+    LogicalKeyboardKey.f5: 0xffc2,
+    LogicalKeyboardKey.f6: 0xffc3,
+    LogicalKeyboardKey.f7: 0xffc4,
+    LogicalKeyboardKey.f8: 0xffc5,
+    LogicalKeyboardKey.f9: 0xffc6,
+    LogicalKeyboardKey.f10: 0xffc7,
+    LogicalKeyboardKey.f11: 0xffc8,
+    LogicalKeyboardKey.f12: 0xffc9,
+  };
+
+  /// Dérive un keyval GDK pour [event]. Renvoie `null` si aucune
+  /// correspondance fiable n'a pu être établie (dans ce cas, l'événement
+  /// n'est pas transmis au natif plutôt que d'envoyer une valeur au
+  /// hasard).
+  int? _gdkKeyvalFor(KeyEvent event) {
+    final named = _gdkNamedKeyvals[event.logicalKey];
+    if (named != null) return named;
+
+    final character = event.character;
+    if (character != null && character.isNotEmpty) {
+      final codePoint = character.runes.first;
+      if (codePoint < 0x100) return codePoint;
+      return 0x01000000 + codePoint;
     }
+    return null;
+  }
+
+  int _gdkStateFromKeyboard() {
+    final pressed = HardwareKeyboard.instance.logicalKeysPressed;
+    int state = 0;
+    if (pressed.contains(LogicalKeyboardKey.shiftLeft) ||
+        pressed.contains(LogicalKeyboardKey.shiftRight)) {
+      state |= 1 << 0; // GDK_SHIFT_MASK
+    }
+    if (pressed.contains(LogicalKeyboardKey.controlLeft) ||
+        pressed.contains(LogicalKeyboardKey.controlRight)) {
+      state |= 1 << 2; // GDK_CONTROL_MASK
+    }
+    if (pressed.contains(LogicalKeyboardKey.altLeft) ||
+        pressed.contains(LogicalKeyboardKey.altRight)) {
+      state |= 1 << 3; // GDK_MOD1_MASK
+    }
+    return state;
+  }
+
+  KeyEventResult _handleLinuxKeyEvent(FocusNode node, KeyEvent event) {
+    final viewId = _linuxViewId;
+    if (viewId == null || !_linuxReady) return KeyEventResult.ignored;
+    if (event is KeyRepeatEvent) {
+      // Traité comme un nouvel appui : suffisant pour la répétition de
+      // touche dans un champ de texte / le défilement au clavier.
+    }
+    final keyval = _gdkKeyvalFor(event);
+    if (keyval == null) return KeyEventResult.ignored;
+
+    final bool isDown = event is KeyDownEvent || event is KeyRepeatEvent;
+    _globalLinuxChannel.invokeMethod('sendKeyEvent', {
+      'viewId': viewId,
+      'keyval': keyval,
+      'state': _gdkStateFromKeyboard(),
+      // NOTE : le hardware keycode réel dépend du clavier/serveur X et ne
+      // peut pas être dérivé de façon fiable depuis un `KeyEvent` Flutter ;
+      // on transmet 0. La saisie de texte, les flèches et les raccourcis
+      // basés sur le keyval fonctionnent normalement (GtkIMContextSimple),
+      // mais `KeyboardEvent.code` côté JS ne sera pas physiquement exact.
+      'hardwareKeycode': 0,
+      'isDown': isDown,
+    });
+    return KeyEventResult.handled;
   }
 
   /// Traduit l'identifiant générique reçu du plugin natif Windows (voir
@@ -652,6 +769,114 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
     );
   }
 
+  Widget _buildLinuxWebview() {
+    if (!_linuxReady || _linuxTextureId == null) {
+      return const SizedBox.expand();
+    }
+
+    return NotificationListener<SizeChangedLayoutNotification>(
+      onNotification: (_) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          _reportLinuxSurfaceSize();
+        });
+        return true;
+      },
+      child: SizeChangedLayoutNotifier(
+        child: Focus(
+          focusNode: _linuxFocusNode,
+          onKeyEvent: _handleLinuxKeyEvent,
+          child: Listener(
+            onPointerHover: (event) {
+              _globalLinuxChannel.invokeMethod('setCursorPos', {
+                'viewId': _linuxViewId,
+                'x': event.localPosition.dx,
+                'y': event.localPosition.dy,
+              });
+            },
+            onPointerDown: (event) {
+              _linuxFocusNode.requestFocus();
+              _globalLinuxChannel.invokeMethod('setCursorPos', {
+                'viewId': _linuxViewId,
+                'x': event.localPosition.dx,
+                'y': event.localPosition.dy,
+              });
+              final button = _buttonFromPointerButtons(event.buttons);
+              if (button != 0) {
+                _downButtons[event.pointer] = button;
+                _globalLinuxChannel.invokeMethod('setPointerButton', {
+                  'viewId': _linuxViewId,
+                  'button': button,
+                  'isDown': true,
+                });
+              }
+            },
+            onPointerUp: (event) {
+              final button = _downButtons.remove(event.pointer);
+              if (button != null) {
+                _globalLinuxChannel.invokeMethod('setPointerButton', {
+                  'viewId': _linuxViewId,
+                  'button': button,
+                  'isDown': false,
+                });
+              }
+            },
+            onPointerCancel: (event) {
+              final button = _downButtons.remove(event.pointer);
+              if (button != null) {
+                _globalLinuxChannel.invokeMethod('setPointerButton', {
+                  'viewId': _linuxViewId,
+                  'button': button,
+                  'isDown': false,
+                });
+              }
+            },
+            onPointerMove: (event) {
+              _globalLinuxChannel.invokeMethod('setCursorPos', {
+                'viewId': _linuxViewId,
+                'x': event.localPosition.dx,
+                'y': event.localPosition.dy,
+              });
+            },
+            onPointerSignal: (signal) {
+              if (signal is PointerScrollEvent) {
+                // IMPORTANT : contrairement à Windows/WebView2, GTK/WebKitGTK
+                // attend la même convention de signe que
+                // `PointerScrollEvent.scrollDelta` (positif = défilement
+                // vers le bas). Ne PAS inverser le signe ici — c'est cette
+                // inversion (copiée depuis le chemin Windows) qui causait le
+                // "scroll inversé" rapporté.
+                _globalLinuxChannel.invokeMethod('setScrollDelta', {
+                  'viewId': _linuxViewId,
+                  'dx': signal.scrollDelta.dx,
+                  'dy': signal.scrollDelta.dy,
+                });
+              }
+            },
+            onPointerPanZoomUpdate: (signal) {
+              if (signal.panDelta.dx.abs() > signal.panDelta.dy.abs()) {
+                _globalLinuxChannel.invokeMethod('setScrollDelta', {
+                  'viewId': _linuxViewId,
+                  'dx': signal.panDelta.dx,
+                  'dy': 0.0,
+                });
+              } else {
+                _globalLinuxChannel.invokeMethod('setScrollDelta', {
+                  'viewId': _linuxViewId,
+                  'dx': 0.0,
+                  'dy': -signal.panDelta.dy,
+                });
+              }
+            },
+            child: Texture(
+              textureId: _linuxTextureId!,
+              filterQuality: widget.filterQuality,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     // On extrait la couleur d'arrière-plan par défaut pour l'appliquer à toutes les plateformes
@@ -813,10 +1038,18 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
         break;
 
       case TargetPlatform.linux:
-        platformWidget = _LinuxGeometryObserver(
-          onGeometryChanged: _handleLinuxGeometryChanged,
-          onDetached: () => _pushLinuxFrame(Rect.zero, visible: false),
-          child: const SizedBox.expand(),
+        platformWidget = LayoutBuilder(
+          key: _linuxWidgetKey,
+          builder: (context, constraints) {
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              _reportLinuxSurfaceSize();
+            });
+            return SizedBox(
+              width: constraints.maxWidth,
+              height: constraints.maxHeight,
+              child: _buildLinuxWebview(),
+            );
+          },
         );
         break;
 
@@ -869,86 +1102,7 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
     if (_linuxViewId != null) {
       _globalLinuxChannel.invokeMethod('dispose', {'viewId': _linuxViewId});
     }
+    _linuxFocusNode.dispose();
     super.dispose();
-  }
-}
-
-/// Convertit chaque `paint()` du sous-arbre en rectangle exprimé dans les
-/// coordonnées globales de la fenêtre (`getTransformTo(null)`), afin de
-/// positionner le `GtkWidget` natif en conséquence (voir `_initLinuxWebview`
-/// / `setFrame`). Porté depuis l'implémentation de référence
-/// `linux_webview_widget.dart` (approche `webview_flutter_platform_interface`
-/// pour Linux).
-class _LinuxGeometryObserver extends SingleChildRenderObjectWidget {
-  const _LinuxGeometryObserver({
-    required this.onGeometryChanged,
-    required this.onDetached,
-    required Widget child,
-  }) : super(child: child);
-
-  final ValueChanged<Rect> onGeometryChanged;
-  final VoidCallback onDetached;
-
-  @override
-  RenderObject createRenderObject(BuildContext context) {
-    return _LinuxGeometryRenderBox(
-      onGeometryChanged: onGeometryChanged,
-      onDetached: onDetached,
-    );
-  }
-
-  @override
-  void updateRenderObject(
-    BuildContext context,
-    covariant _LinuxGeometryRenderBox renderObject,
-  ) {
-    renderObject
-      ..onGeometryChanged = onGeometryChanged
-      ..onDetached = onDetached;
-  }
-}
-
-class _LinuxGeometryRenderBox extends RenderProxyBox {
-  _LinuxGeometryRenderBox({
-    required this._onGeometryChanged,
-    required this._onDetached,
-  });
-
-  ValueChanged<Rect> _onGeometryChanged;
-  VoidCallback _onDetached;
-
-  set onGeometryChanged(ValueChanged<Rect> value) {
-    _onGeometryChanged = value;
-  }
-
-  set onDetached(VoidCallback value) {
-    _onDetached = value;
-  }
-
-  @override
-  void detach() {
-    _onDetached();
-    super.detach();
-  }
-
-  @override
-  void paint(PaintingContext context, Offset offset) {
-    super.paint(context, offset);
-    if (!attached) {
-      return;
-    }
-    final Matrix4 transform = getTransformTo(null);
-    final Offset topLeft = MatrixUtils.transformPoint(transform, Offset.zero);
-    final Offset bottomRight = MatrixUtils.transformPoint(
-      transform,
-      Offset(size.width, size.height),
-    );
-    final Rect rect = Rect.fromLTRB(
-      math.min(topLeft.dx, bottomRight.dx),
-      math.min(topLeft.dy, bottomRight.dy),
-      math.max(topLeft.dx, bottomRight.dx),
-      math.max(topLeft.dy, bottomRight.dy),
-    );
-    _onGeometryChanged(rect);
   }
 }

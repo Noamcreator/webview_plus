@@ -146,6 +146,16 @@ gboolean capture_frame(gpointer user_data) {
     return G_SOURCE_CONTINUE;
   }
 
+  // Ne capture que si la fenêtre est effectivement mappée à l'écran (même
+  // hors zone visible, elle doit avoir terminé sa création X11). Capturer
+  // une fenêtre pas encore mappée, ou en cours de redimensionnement, est ce
+  // qui expose le plus `gdk_pixbuf_get_from_window` à un BadMatch/BadWindow
+  // X11 — erreur fatale par défaut sous Xlib/GDK, qui tue tout le
+  // processus (donc toute la fenêtre Flutter), pas seulement la webview.
+  if (!gdk_window_is_visible(gdk_window)) {
+    return G_SOURCE_CONTINUE;
+  }
+
   const int width = gdk_window_get_width(gdk_window);
   const int height = gdk_window_get_height(gdk_window);
   if (width <= 0 || height <= 0) {
@@ -163,6 +173,7 @@ gboolean capture_frame(gpointer user_data) {
   const int rowstride = gdk_pixbuf_get_rowstride(pixbuf);
   const int n_channels = gdk_pixbuf_get_n_channels(pixbuf);
   const guchar *pixels = gdk_pixbuf_get_pixels(pixbuf);
+  const int dst_rowstride = pb_width * 4;
 
   {
     std::lock_guard<std::mutex> lock(bridge->frame_mutex);
@@ -174,19 +185,32 @@ gboolean capture_frame(gpointer user_data) {
       bridge->frame_width = pb_width;
       bridge->frame_height = pb_height;
     }
-    // `gdk_pixbuf_get_from_window` renvoie du RGB (3 canaux) ou RGBA
-    // (4 canaux) selon que la fenêtre a un canal alpha ; on normalise en
-    // RGBA opaque dans les deux cas, ce que `FlPixelBufferTexture` attend.
-    for (int y = 0; y < pb_height; y++) {
-      const guchar *src_row = pixels + y * rowstride;
-      guchar *dst_row = bridge->frame_data + y * pb_width * 4;
-      for (int x = 0; x < pb_width; x++) {
-        const guchar *src = src_row + x * n_channels;
-        guchar *dst = dst_row + x * 4;
-        dst[0] = src[0];
-        dst[1] = src[1];
-        dst[2] = src[2];
-        dst[3] = n_channels >= 4 ? src[3] : 0xFF;
+    // `gdk_pixbuf_get_from_window` renvoie quasi toujours du RGBA
+    // (4 canaux) pour une fenêtre composée normalement : dans ce cas on
+    // fait un simple memcpy ligne par ligne (rapide), ce qui évite la
+    // boucle pixel-par-pixel en C qui saturait un cœur CPU à ~60 fps sur
+    // les pages lourdes. On ne retombe sur la conversion pixel-par-pixel
+    // (avec alpha forcé à opaque) que dans le cas RGB (3 canaux), qui reste
+    // possible mais rare.
+    if (n_channels == 4 && rowstride == dst_rowstride) {
+      memcpy(bridge->frame_data, pixels,
+             static_cast<size_t>(dst_rowstride) * pb_height);
+    } else {
+      for (int y = 0; y < pb_height; y++) {
+        const guchar *src_row = pixels + y * rowstride;
+        guchar *dst_row = bridge->frame_data + y * dst_rowstride;
+        if (n_channels == 4) {
+          memcpy(dst_row, src_row, static_cast<size_t>(dst_rowstride));
+          continue;
+        }
+        for (int x = 0; x < pb_width; x++) {
+          const guchar *src = src_row + x * n_channels;
+          guchar *dst = dst_row + x * 4;
+          dst[0] = src[0];
+          dst[1] = src[1];
+          dst[2] = src[2];
+          dst[3] = 0xFF;
+        }
       }
     }
   }

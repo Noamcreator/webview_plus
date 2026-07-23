@@ -213,6 +213,56 @@ void handle_instance_method_call(LinuxWebview *webview,
     return;
   }
 
+  // `injectJsData`/`injectCssData` : injection de contenu déjà en mémoire
+  // côté Dart (par opposition à `injectJavascriptFileFromUrl/Asset` et
+  // `injectCSSFileFromUrl/Asset`, qui pointent vers une ressource externe à
+  // charger). Ces deux méthodes étaient absentes de ce fichier, d'où le
+  // `MissingPluginException` : `handle_instance_method_call` tombait dans
+  // le `fl_method_not_implemented_response_new()` par défaut en bas de
+  // fonction pour toute méthode inconnue.
+  if (strcmp(method, "injectJsData") == 0) {
+    const gchar *js_data = map_lookup_string(args, "jsData");
+    if (js_data == nullptr) {
+      respond(method_call, error_response("invalid_argument", "jsData manquant."));
+      return;
+    }
+    webkit_web_view_evaluate_javascript(web_view, js_data, -1, nullptr, nullptr,
+                                        nullptr, nullptr, nullptr);
+    respond(method_call, success_response());
+    return;
+  }
+
+  if (strcmp(method, "injectCssData") == 0) {
+    const gchar *css_data = map_lookup_string(args, "cssData");
+    if (css_data == nullptr) {
+      respond(method_call, error_response("invalid_argument", "cssData manquant."));
+      return;
+    }
+    g_autofree gchar *css_literal = js_string_literal(css_data);
+    g_autofree gchar *js = g_strdup_printf(
+        "(function(){var st=document.createElement('style');"
+        "st.appendChild(document.createTextNode(%s));"
+        "(document.head||document.documentElement).appendChild(st);})();",
+        css_literal);
+    webkit_web_view_evaluate_javascript(web_view, js, -1, nullptr, nullptr,
+                                        nullptr, nullptr, nullptr);
+    respond(method_call, success_response());
+    return;
+  }
+
+  // Le menu contextuel natif est intégralement supprimé côté Linux (voir
+  // `context_menu_cb` dans `linux_webview.cc` : il se positionne en
+  // coordonnées écran absolues, incompatibles avec la fenêtre offscreen
+  // hébergeant le WebKitWebView). `setContextMenuItems` fait partie de
+  // l'API partagée du controller et peut donc être appelée sans
+  // vérification de plateforme côté Dart : on acquitte sans effet plutôt
+  // que de renvoyer `not_implemented`, qui remonterait comme une
+  // `MissingPluginException` côté appelant.
+  if (strcmp(method, "setContextMenuItems") == 0) {
+    respond(method_call, success_response());
+    return;
+  }
+
   if (strcmp(method, "reload") == 0) {
     webview->is_navigating_internally = TRUE;
     webkit_web_view_reload(web_view);

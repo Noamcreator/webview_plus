@@ -1,3 +1,7 @@
+## 0.8.7
+
+- On linux the crash on start is fix.
+
 ## 0.8.6
 
 * Fixed a deprecation warning by replacing `configuration.preferences.javaScriptEnabled` with `configuration.defaultWebpagePreferences.allowsContentJavaScript` for macOS 11.0 and later.
