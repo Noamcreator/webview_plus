@@ -74,7 +74,17 @@ typedef struct {
   // déclenchées nous-mêmes (loadUrl/reload/goBack/goForward/...), pour
   // éviter une boucle infinie. Cf. équivalent Android/iOS/macOS.
   gboolean is_navigating_internally;
+
+  // Durée de vie : les callbacks asynchrones (réponses Dart d'un
+  // `callHandler`, décisions de navigation...) peuvent arriver APRÈS le
+  // `dispose` Dart. Elles gardent donc une référence (`linux_webview_ref`)
+  // et testent `disposed` avant de toucher à `web_view`/`channel`.
+  gint ref_count;
+  gboolean disposed;
 } LinuxWebview;
+
+LinuxWebview *linux_webview_ref(LinuxWebview *webview);
+void linux_webview_unref(LinuxWebview *webview);
 
 // webview/linux_webview.cc
 LinuxWebview *create_linux_webview(WebviewPlusPlugin *self, gint64 view_id,

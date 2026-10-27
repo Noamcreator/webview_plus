@@ -17,6 +17,12 @@ set(PLUGIN_NAME "webview_plus_plugin")
 # plugins Flutter Linux officiels (ex: webview_flutter).
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(WEBKIT REQUIRED IMPORTED_TARGET webkit2gtk-4.1)
+# La cible `PkgConfig::GTK` est normalement déclarée par le CMakeLists de
+# l'application hôte ; on la crée ici si ce n'est pas le cas, plutôt que
+# d'échouer à la configuration.
+if(NOT TARGET PkgConfig::GTK)
+  pkg_check_modules(GTK REQUIRED IMPORTED_TARGET gtk+-3.0)
+endif()
 
 # Any new source files that you add to the plugin should be added here.
 list(APPEND PLUGIN_SOURCES

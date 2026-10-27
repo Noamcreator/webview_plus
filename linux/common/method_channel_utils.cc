@@ -54,6 +54,9 @@ FlMethodResponse *error_response(const gchar *code, const gchar *message) {
 }
 
 void respond(FlMethodCall *method_call, FlMethodResponse *response) {
+  // `fl_method_call_respond` ne prend pas possession de la réponse : sans
+  // ce `g_autoptr`, chaque appel de méthode fuyait un FlMethodResponse.
+  g_autoptr(FlMethodResponse) owned_response = response;
   g_autoptr(GError) error = nullptr;
   if (!fl_method_call_respond(method_call, response, &error)) {
     g_warning("webview_plus: échec de l'envoi de la réponse: %s",

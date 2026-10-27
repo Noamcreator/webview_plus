@@ -1,3 +1,16 @@
+## 0.8.8
+
+- **Linux:** Fixed a pixel buffer use-after-free issue (Flutter raster thread vs. resizing) that could crash the app when launching a WebView page.
+- **Linux:** X11 errors during capture (BadMatch/BadWindow) are now caught instead of crashing the process.
+- **Linux:** Eliminated dangling pointers after `dispose` (`callHandler` callbacks, WebKit signals, channel handler).
+- **Linux:** Implemented on-demand capture (`draw` signal) instead of a constant 60 fps -> ~0 CPU usage when idle, smoother rendering.
+- **Linux:** Added support for `allowFileAccessFromFileURLs`, `allowUniversalAccessFromFileURLs`, `mediaPlaybackRequiresUserGesture`, `domStorageEnabled`, and `initialBackgroundColor`; console logs are now sent to stdout if `isInspectable` is enabled.
+- **Linux:** Set `WEBKIT_DISABLE_DMABUF_RENDERER=1` and `WEBKIT_DISABLE_COMPOSITING_MODE=1` by default (without overwriting existing environment variables).
+- **Linux:** Fixed an `FlMethodResponse` memory leak per call; CMake now creates `PkgConfig::GTK` if missing.
+- **Dart:** The native view is now properly destroyed if the widget is unmounted during `create`.
+- **Dependencies update:** Upgraded the `web` package from version `1.1.1` to `1.1.2` in `pubspec.yaml`.
+- **SDK update:** Upgraded the Flutter / Dart SDK from version `3.12.2` to `3.13.7` in `pubspec.yaml`.
+
 ## 0.8.7
 
 - On linux the crash on start is fix.

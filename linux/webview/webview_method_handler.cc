@@ -66,7 +66,8 @@ void eval_finished_cb(GObject *object, GAsyncResult *result, gpointer user_data)
 
   g_autoptr(FlJsonMessageCodec) codec = fl_json_message_codec_new();
   g_autoptr(GError) decode_error = nullptr;
-  FlValue *decoded = fl_json_message_codec_decode(codec, json, &decode_error);
+  g_autoptr(FlValue) decoded =
+      fl_json_message_codec_decode(codec, json, &decode_error);
   respond(method_call, success_response(decoded));
   g_object_unref(method_call);
 }
@@ -77,6 +78,11 @@ void handle_instance_method_call(LinuxWebview *webview,
                                  FlMethodCall *method_call) {
   const gchar *method = fl_method_call_get_name(method_call);
   FlValue *args = fl_method_call_get_args(method_call);
+  if (webview->disposed || webview->web_view == nullptr) {
+    respond(method_call,
+            error_response("disposed", "La Webview a déjà été détruite."));
+    return;
+  }
   WebKitWebView *web_view = webview->web_view;
 
   if (strcmp(method, "loadUrl") == 0) {
@@ -285,15 +291,14 @@ void handle_instance_method_call(LinuxWebview *webview,
   }
 
   if (strcmp(method, "canGoBack") == 0) {
-    respond(method_call, success_response(
-                             fl_value_new_bool(webkit_web_view_can_go_back(web_view))));
+    g_autoptr(FlValue) value = fl_value_new_bool(webkit_web_view_can_go_back(web_view));
+    respond(method_call, success_response(value));
     return;
   }
 
   if (strcmp(method, "canGoForward") == 0) {
-    respond(method_call,
-            success_response(
-                fl_value_new_bool(webkit_web_view_can_go_forward(web_view))));
+    g_autoptr(FlValue) value = fl_value_new_bool(webkit_web_view_can_go_forward(web_view));
+    respond(method_call, success_response(value));
     return;
   }
 

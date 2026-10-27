@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -454,7 +455,15 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
         onLoadResource: widget.onLoadResource,
       );
 
-      if (!mounted) return;
+      if (!mounted) {
+        // Le widget a été démonté pendant la création native : `dispose()`
+        // a déjà été envoyé alors que la vue n'existait pas encore (no-op
+        // côté C++). Sans cet appel, la fenêtre hôte hors écran resterait
+        // vivante (capture + rendu en tâche de fond) jusqu'à la fermeture.
+        unawaited(_globalLinuxChannel
+            .invokeMethod('dispose', {'viewId': id}).catchError((_) {}));
+        return;
+      }
       setState(() {
         _linuxTextureId = textureId;
         _linuxReady = textureId != null;

@@ -1,158 +1,219 @@
 #include "rendering/texture_bridge_linux.h"
 
 #include <cstring>
-#include <mutex>
 
-// ATTENTION — NON COMPILÉ NI TESTÉ ICI : cet environnement ne dispose pas
-// des headers de développement GTK3/WebKitGTK ni du SDK Flutter Linux
-// (`flutter_linux/*.h`), donc ce fichier n'a pas pu être passé au
-// compilateur. Corrige au besoin en le compilant chez toi.
+#ifdef GDK_WINDOWING_X11
+#include <gdk/gdkx.h>
+#endif
+
+// -- Principe -------------------------------------------------------------
+// WebKitGTK n'est pas un simple widget de dessin : il pilote un vrai
+// sous-processus web et s'appuie sur de vraies fenêtres X11. Un
+// `GtkOffscreenWindow` ne convient donc pas ("drawable is not a native X11
+// window"). On héberge le WebKitWebView dans une VRAIE fenêtre GTK
+// top-level, non décorée, en override-redirect et positionnée hors de tout
+// écran. On en capture le contenu via `gdk_pixbuf_get_from_window` et on le
+// republie comme `FlPixelBufferTexture`, comme WebView2 est composé côté
+// Windows (`windows/rendering/texture_bridge.cc`).
 //
-// -- Historique : pourquoi pas un GtkOffscreenWindow ? --------------------
-// Une première version hébergeait le WebKitWebView dans un
-// `GtkOffscreenWindow`. Ça compile, mais ça plante à l'exécution
-// ("drawable is not a native X11 window", assertions GDK_IS_WINDOW) :
-// `GtkOffscreenWindow` fournit une `GdkWindow` de type `GDK_WINDOW_OFFSCREEN`
-// qui n'est PAS une fenêtre X11 native. Or WebKitGTK n'est pas un simple
-// widget de dessin : il pilote un vrai sous-processus web (WebProcess) et
-// s'appuie en interne sur de vraies fenêtres/surfaces X11/EGL pour
-// communiquer avec lui. De nombreux chemins internes de GTK/WebKit
-// (positionnement de popups, tooltips, calcul de coordonnées écran, DnD…)
-// appellent des fonctions X11 qui exigent une fenêtre native et plantent
-// sinon. `GtkOffscreenWindow` est prévu pour des snapshots de widgets
-// simples (boutons, labels...), pas pour héberger un widget aussi complexe
-// que WebKitGTK.
+// LIMITE CONNUE : `gtk_window_move` / override-redirect sont des notions X11.
+// Sous Wayland pur, la fenêtre hôte ne peut pas être cachée. Lancer
+// l'application avec `GDK_BACKEND=x11` (XWayland) ou forcer le backend dans
+// `main.cc` (voir le README / CHANGELOG).
 //
-// -- La technique retenue : vraie fenêtre, positionnée hors écran --------
-// On utilise donc une VRAIE fenêtre GTK top-level (non décorée), mais
-// déplacée à des coordonnées très négatives (hors de tout écran visible).
-// C'est une fenêtre X11 native comme une autre : WebKitGTK y fonctionne
-// normalement (y compris son sous-processus, son rendu, ses popups
-// internes…). L'utilisateur ne la voit simplement jamais, parce qu'aucun
-// moniteur ne couvre ces coordonnées.
-// On en capture le contenu périodiquement via `gdk_pixbuf_get_from_window`
-// (qui, lui, exige justement une fenêtre native — donc fonctionne ici,
-// contrairement à l'offscreen), et on republie chaque frame comme
-// `FlPixelBufferTexture`, exactement comme WebView2 est composé côté
-// Windows via Windows.Graphics.Capture (`windows/rendering/texture_bridge.cc`).
-//
-// LIMITE CONNUE : ce positionnement par coordonnées négatives est une
-// notion X11 (`gtk_window_move`) ; sous Wayland pur, un client ne peut pas
-// positionner lui-même ses fenêtres top-level, cette technique ne
-// fonctionnera donc pas telle quelle (il faudrait un protocole compositeur
-// dédié, ex. wlr-layer-shell, hors périmètre de ce correctif). D'après ta
-// trace d'erreur (`gdk/x11/gdkwindow-x11.c`), tu es actuellement sur le
-// backend X11 (ou XWayland), donc ça s'applique directement à ton cas.
+// -- Corrections de robustesse (crash au lancement d'une page WebView) -----
+// 1. Use-after-free du buffer de pixels : `copy_pixels` est appelée par le
+//    thread raster de Flutter ; l'ancien code retournait un pointeur vers
+//    un buffer que le thread principal pouvait `g_free` (redimensionnement)
+//    pendant que le moteur le lisait. Désormais la texture possède DEUX
+//    buffers : `frame_*` (écrit par le thread GTK sous verrou) et `out_*`
+//    (copie privée au thread raster, stable jusqu'au prochain appel).
+// 2. La texture ne référence plus le bridge (pointeur pendant après
+//    `linux_texture_bridge_free`) : elle possède ses données.
+// 3. Les erreurs X11 (BadMatch/BadWindow sur `XGetImage` pendant un
+//    redimensionnement ou si la fenêtre n'est pas encore affichable) sont
+//    piégées avec `gdk_x11_display_error_trap_*` au lieu de tuer tout le
+//    processus (comportement par défaut de GDK).
+// 4. Capture à la demande (signal "draw") plutôt que 60 fps permanents :
+//    CPU ~0 quand la page ne bouge pas, rendu plus fluide quand elle
+//    bouge, avec un rafraîchissement de sécurité toutes les 250 ms.
 
 namespace {
 constexpr int kOffscreenX = -10000;
 constexpr int kOffscreenY = -10000;
-constexpr guint kCaptureIntervalMs = 16;  // ~60 fps
+constexpr guint kCaptureIntervalMs = 16;        // ~60 fps max
+constexpr gint64 kIdleRefreshUs = 250 * 1000;   // filet de sécurité
+constexpr gint kDirtyFramesOnDraw = 3;
 }  // namespace
 
 struct _LinuxTextureBridge {
   FlTextureRegistrar *registrar;
-  FlPixelBufferTexture *texture;  // instance de WebviewPlusPixelBufferTexture
+  FlPixelBufferTexture *texture;  // référence possédée par le bridge
   WebKitWebView *web_view;
   GtkWidget *host_window;  // vraie fenêtre top-level, positionnée hors écran
 
-  std::mutex frame_mutex;
-  guchar *frame_data;  // RGBA, propriété du bridge
-  int frame_width;
-  int frame_height;
-
   guint capture_timeout_id;
-  guint pressed_buttons_mask;  // GDK_BUTTONx_MASK combinés, boutons actuellement enfoncés
+  gulong draw_handler_id;
+  guint pressed_buttons_mask;  // GDK_BUTTONx_MASK combinés
+
+  gint dirty_frames;       // > 0 : le contenu a changé, à recapturer
+  gint64 last_capture_us;  // monotonic
+  gboolean registered;
+  gboolean stopped;
 };
 
 // -- Sous-classe GObject de FlPixelBufferTexture --------------------------
-//
-// `FlPixelBufferTexture` (flutter_linux) n'expose pas de constructeur à
-// callback : c'est un type abstrait fait pour être dérivé (comme un widget
-// GTK en C), avec une vfunc `copy_pixels` à surcharger dans la classe
-// dérivée. On définit donc ici un petit type dédié qui porte juste un
-// pointeur non-possédant vers le `LinuxTextureBridge` propriétaire, pour
-// aller lire son dernier buffer capturé au moment où le moteur Flutter
-// demande à peindre la texture.
 G_DECLARE_FINAL_TYPE(WebviewPlusPixelBufferTexture,
                      webview_plus_pixel_buffer_texture, WEBVIEW_PLUS,
                      PIXEL_BUFFER_TEXTURE, FlPixelBufferTexture)
 
 struct _WebviewPlusPixelBufferTexture {
   FlPixelBufferTexture parent_instance;
-  LinuxTextureBridge *bridge;  // non possédé : le bridge possède la texture
+
+  GMutex lock;
+  // Écrit par le thread GTK (capture_frame), sous `lock`.
+  guchar *frame_data;
+  gsize frame_capacity;
+  int frame_width;
+  int frame_height;
+  // Lu/écrit uniquement par le thread raster (copy_pixels).
+  guchar *out_data;
+  gsize out_capacity;
 };
 
 G_DEFINE_TYPE(WebviewPlusPixelBufferTexture, webview_plus_pixel_buffer_texture,
-             fl_pixel_buffer_texture_get_type())
+              fl_pixel_buffer_texture_get_type())
 
 static gboolean webview_plus_pixel_buffer_texture_copy_pixels(
-    FlPixelBufferTexture *texture, const uint8_t **out_buffer,
-    uint32_t *width, uint32_t *height, GError **error) {
+    FlPixelBufferTexture *texture, const uint8_t **out_buffer, uint32_t *width,
+    uint32_t *height, GError **error) {
+  (void)error;
   WebviewPlusPixelBufferTexture *self =
       WEBVIEW_PLUS_PIXEL_BUFFER_TEXTURE(texture);
-  LinuxTextureBridge *bridge = self->bridge;
-  if (bridge == nullptr) {
-    *out_buffer = nullptr;
-    *width = 0;
-    *height = 0;
-    return FALSE;
-  }
 
-  std::lock_guard<std::mutex> lock(bridge->frame_mutex);
-  if (bridge->frame_data == nullptr) {
+  g_mutex_lock(&self->lock);
+  if (self->frame_data == nullptr || self->frame_width <= 0 ||
+      self->frame_height <= 0) {
+    g_mutex_unlock(&self->lock);
     *out_buffer = nullptr;
     *width = 0;
     *height = 0;
     return FALSE;
   }
-  *out_buffer = bridge->frame_data;
-  *width = static_cast<uint32_t>(bridge->frame_width);
-  *height = static_cast<uint32_t>(bridge->frame_height);
+  const gsize size =
+      static_cast<gsize>(self->frame_width) * self->frame_height * 4;
+  if (self->out_capacity < size) {
+    g_free(self->out_data);
+    self->out_data = static_cast<guchar *>(g_malloc(size));
+    self->out_capacity = size;
+  }
+  memcpy(self->out_data, self->frame_data, size);
+  *width = static_cast<uint32_t>(self->frame_width);
+  *height = static_cast<uint32_t>(self->frame_height);
+  g_mutex_unlock(&self->lock);
+
+  // `out_data` n'est modifié que par le prochain appel à copy_pixels (même
+  // thread), donc stable pendant que le moteur l'envoie au GPU.
+  *out_buffer = self->out_data;
   return TRUE;
+}
+
+static void webview_plus_pixel_buffer_texture_finalize(GObject *object) {
+  WebviewPlusPixelBufferTexture *self =
+      WEBVIEW_PLUS_PIXEL_BUFFER_TEXTURE(object);
+  g_free(self->frame_data);
+  g_free(self->out_data);
+  g_mutex_clear(&self->lock);
+  G_OBJECT_CLASS(webview_plus_pixel_buffer_texture_parent_class)
+      ->finalize(object);
 }
 
 static void webview_plus_pixel_buffer_texture_class_init(
     WebviewPlusPixelBufferTextureClass *klass) {
   FL_PIXEL_BUFFER_TEXTURE_CLASS(klass)->copy_pixels =
       webview_plus_pixel_buffer_texture_copy_pixels;
+  G_OBJECT_CLASS(klass)->finalize = webview_plus_pixel_buffer_texture_finalize;
 }
 
 static void webview_plus_pixel_buffer_texture_init(
     WebviewPlusPixelBufferTexture *self) {
-  self->bridge = nullptr;
+  g_mutex_init(&self->lock);
 }
 
-static FlPixelBufferTexture *webview_plus_pixel_buffer_texture_new(
-    LinuxTextureBridge *bridge) {
-  WebviewPlusPixelBufferTexture *self = WEBVIEW_PLUS_PIXEL_BUFFER_TEXTURE(
+static FlPixelBufferTexture *webview_plus_pixel_buffer_texture_new() {
+  return FL_PIXEL_BUFFER_TEXTURE(
       g_object_new(webview_plus_pixel_buffer_texture_get_type(), nullptr));
-  self->bridge = bridge;
-  return FL_PIXEL_BUFFER_TEXTURE(self);
+}
+
+// Copie [pixbuf] (RGB ou RGBA) dans le buffer de frame de la texture.
+static void texture_publish_pixbuf(WebviewPlusPixelBufferTexture *self,
+                                   GdkPixbuf *pixbuf) {
+  const int w = gdk_pixbuf_get_width(pixbuf);
+  const int h = gdk_pixbuf_get_height(pixbuf);
+  const int rowstride = gdk_pixbuf_get_rowstride(pixbuf);
+  const int n_channels = gdk_pixbuf_get_n_channels(pixbuf);
+  const guchar *pixels = gdk_pixbuf_get_pixels(pixbuf);
+  const int dst_rowstride = w * 4;
+  const gsize size = static_cast<gsize>(dst_rowstride) * h;
+
+  g_mutex_lock(&self->lock);
+  if (self->frame_capacity < size) {
+    g_free(self->frame_data);
+    self->frame_data = static_cast<guchar *>(g_malloc(size));
+    self->frame_capacity = size;
+  }
+  self->frame_width = w;
+  self->frame_height = h;
+
+  if (n_channels == 4 && rowstride == dst_rowstride) {
+    memcpy(self->frame_data, pixels, size);
+  } else {
+    for (int y = 0; y < h; y++) {
+      const guchar *src_row = pixels + static_cast<gsize>(y) * rowstride;
+      guchar *dst_row = self->frame_data + static_cast<gsize>(y) * dst_rowstride;
+      if (n_channels == 4) {
+        memcpy(dst_row, src_row, static_cast<size_t>(dst_rowstride));
+        continue;
+      }
+      for (int x = 0; x < w; x++) {
+        const guchar *src = src_row + x * n_channels;
+        guchar *dst = dst_row + x * 4;
+        dst[0] = src[0];
+        dst[1] = src[1];
+        dst[2] = src[2];
+        dst[3] = 0xFF;
+      }
+    }
+  }
+  g_mutex_unlock(&self->lock);
 }
 
 namespace {
 
-// Copie le dernier pixbuf capturé de `host_window` dans `bridge->frame_data`
-// (RGBA) et notifie le moteur Flutter qu'une nouvelle frame est disponible.
-// Rappelée en boucle (~60 fps) tant que le bridge est actif — plus simple et
-// plus robuste ici qu'un hook sur un signal de dommage, qui n'existe pas de
-// façon fiable pour une fenêtre X11 normale hébergeant un sous-processus web.
+// Le contenu de la webview vient d'être (re)peint par GTK : à recapturer.
+gboolean on_web_view_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
+  (void)widget;
+  (void)cr;
+  LinuxTextureBridge *bridge = static_cast<LinuxTextureBridge *>(user_data);
+  bridge->dirty_frames = kDirtyFramesOnDraw;
+  return FALSE;  // ne pas interrompre le dessin
+}
+
 gboolean capture_frame(gpointer user_data) {
   LinuxTextureBridge *bridge = static_cast<LinuxTextureBridge *>(user_data);
-
-  GdkWindow *gdk_window = gtk_widget_get_window(bridge->host_window);
-  if (gdk_window == nullptr || !GDK_IS_WINDOW(gdk_window)) {
+  if (bridge->stopped || bridge->host_window == nullptr) {
     return G_SOURCE_CONTINUE;
   }
 
-  // Ne capture que si la fenêtre est effectivement mappée à l'écran (même
-  // hors zone visible, elle doit avoir terminé sa création X11). Capturer
-  // une fenêtre pas encore mappée, ou en cours de redimensionnement, est ce
-  // qui expose le plus `gdk_pixbuf_get_from_window` à un BadMatch/BadWindow
-  // X11 — erreur fatale par défaut sous Xlib/GDK, qui tue tout le
-  // processus (donc toute la fenêtre Flutter), pas seulement la webview.
-  if (!gdk_window_is_visible(gdk_window)) {
+  const gint64 now = g_get_monotonic_time();
+  const gboolean idle_refresh = (now - bridge->last_capture_us) >= kIdleRefreshUs;
+  if (bridge->dirty_frames <= 0 && !idle_refresh) {
+    return G_SOURCE_CONTINUE;
+  }
+
+  GdkWindow *gdk_window = gtk_widget_get_window(bridge->host_window);
+  if (gdk_window == nullptr || !GDK_IS_WINDOW(gdk_window) ||
+      !gdk_window_is_visible(gdk_window)) {
     return G_SOURCE_CONTINUE;
   }
 
@@ -162,63 +223,45 @@ gboolean capture_frame(gpointer user_data) {
     return G_SOURCE_CONTINUE;
   }
 
-  GdkPixbuf *pixbuf =
-      gdk_pixbuf_get_from_window(gdk_window, 0, 0, width, height);
+  GdkDisplay *display = gdk_window_get_display(gdk_window);
+#ifdef GDK_WINDOWING_X11
+  const gboolean is_x11 = GDK_IS_X11_DISPLAY(display);
+  if (is_x11) {
+    gdk_x11_display_error_trap_push(display);
+  }
+#endif
+
+  GdkPixbuf *pixbuf = gdk_pixbuf_get_from_window(gdk_window, 0, 0, width, height);
+
+#ifdef GDK_WINDOWING_X11
+  if (is_x11 && gdk_x11_display_error_trap_pop(display) != 0) {
+    // BadMatch/BadWindow : fenêtre pas (encore) capturable. On réessaie à
+    // la prochaine itération au lieu de faire tomber l'application.
+    if (pixbuf != nullptr) {
+      g_object_unref(pixbuf);
+      pixbuf = nullptr;
+    }
+  }
+#else
+  (void)display;
+#endif
+
   if (pixbuf == nullptr) {
     return G_SOURCE_CONTINUE;
   }
 
-  const int pb_width = gdk_pixbuf_get_width(pixbuf);
-  const int pb_height = gdk_pixbuf_get_height(pixbuf);
-  const int rowstride = gdk_pixbuf_get_rowstride(pixbuf);
-  const int n_channels = gdk_pixbuf_get_n_channels(pixbuf);
-  const guchar *pixels = gdk_pixbuf_get_pixels(pixbuf);
-  const int dst_rowstride = pb_width * 4;
-
-  {
-    std::lock_guard<std::mutex> lock(bridge->frame_mutex);
-    if (bridge->frame_width != pb_width || bridge->frame_height != pb_height ||
-        bridge->frame_data == nullptr) {
-      g_free(bridge->frame_data);
-      bridge->frame_data = static_cast<guchar *>(
-          g_malloc(static_cast<gsize>(pb_width) * pb_height * 4));
-      bridge->frame_width = pb_width;
-      bridge->frame_height = pb_height;
-    }
-    // `gdk_pixbuf_get_from_window` renvoie quasi toujours du RGBA
-    // (4 canaux) pour une fenêtre composée normalement : dans ce cas on
-    // fait un simple memcpy ligne par ligne (rapide), ce qui évite la
-    // boucle pixel-par-pixel en C qui saturait un cœur CPU à ~60 fps sur
-    // les pages lourdes. On ne retombe sur la conversion pixel-par-pixel
-    // (avec alpha forcé à opaque) que dans le cas RGB (3 canaux), qui reste
-    // possible mais rare.
-    if (n_channels == 4 && rowstride == dst_rowstride) {
-      memcpy(bridge->frame_data, pixels,
-             static_cast<size_t>(dst_rowstride) * pb_height);
-    } else {
-      for (int y = 0; y < pb_height; y++) {
-        const guchar *src_row = pixels + y * rowstride;
-        guchar *dst_row = bridge->frame_data + y * dst_rowstride;
-        if (n_channels == 4) {
-          memcpy(dst_row, src_row, static_cast<size_t>(dst_rowstride));
-          continue;
-        }
-        for (int x = 0; x < pb_width; x++) {
-          const guchar *src = src_row + x * n_channels;
-          guchar *dst = dst_row + x * 4;
-          dst[0] = src[0];
-          dst[1] = src[1];
-          dst[2] = src[2];
-          dst[3] = 0xFF;
-        }
-      }
-    }
-  }
-
+  texture_publish_pixbuf(WEBVIEW_PLUS_PIXEL_BUFFER_TEXTURE(bridge->texture),
+                         pixbuf);
   g_object_unref(pixbuf);
 
-  fl_texture_registrar_mark_texture_frame_available(bridge->registrar,
-                                                     FL_TEXTURE(bridge->texture));
+  bridge->last_capture_us = now;
+  if (bridge->dirty_frames > 0) {
+    bridge->dirty_frames--;
+  }
+  if (bridge->registered) {
+    fl_texture_registrar_mark_texture_frame_available(
+        bridge->registrar, FL_TEXTURE(bridge->texture));
+  }
   return G_SOURCE_CONTINUE;
 }
 
@@ -229,13 +272,19 @@ LinuxTextureBridge *linux_texture_bridge_new(FlTextureRegistrar *registrar,
   LinuxTextureBridge *bridge = g_new0(LinuxTextureBridge, 1);
   bridge->registrar = registrar;
   bridge->web_view = web_view;
-  bridge->frame_data = nullptr;
-  bridge->frame_width = 0;
-  bridge->frame_height = 0;
+  bridge->dirty_frames = 10;
+  bridge->texture = webview_plus_pixel_buffer_texture_new();
 
-  // Vraie fenêtre top-level, non décorée, jamais présentée au window
-  // manager comme une fenêtre "normale" et positionnée hors de tout écran
-  // visible — voir le commentaire en tête de fichier pour le pourquoi.
+#ifdef GDK_WINDOWING_X11
+  GdkDisplay *default_display = gdk_display_get_default();
+  if (default_display != nullptr && !GDK_IS_X11_DISPLAY(default_display)) {
+    g_warning(
+        "webview_plus: backend GDK non-X11 détecté (Wayland ?). La fenêtre "
+        "hôte hors écran ne peut pas être cachée sous Wayland : lancez "
+        "l'application avec GDK_BACKEND=x11.");
+  }
+#endif
+
   bridge->host_window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
   gtk_window_set_decorated(GTK_WINDOW(bridge->host_window), FALSE);
   gtk_window_set_skip_taskbar_hint(GTK_WINDOW(bridge->host_window), TRUE);
@@ -243,45 +292,35 @@ LinuxTextureBridge *linux_texture_bridge_new(FlTextureRegistrar *registrar,
   gtk_container_add(GTK_CONTAINER(bridge->host_window), GTK_WIDGET(web_view));
   gtk_window_move(GTK_WINDOW(bridge->host_window), kOffscreenX, kOffscreenY);
 
-  // IMPORTANT : override-redirect fait sortir cette fenêtre de la gestion du
-  // window manager (pas de reparenting, pas de politique de focus décidée
-  // par le WM). Sans ça, `gtk_window_set_accept_focus(FALSE)` (utilisé dans
-  // une version précédente) empêchait la fenêtre de jamais devenir "active"
-  // aux yeux de GTK/WebKit, qui ignorait alors tout événement souris/clavier
-  // synthétique — d'où une Webview purement visuelle, sans interaction
-  // possible. En override-redirect, on peut au contraire forcer nous-mêmes
-  // le focus réel juste avant chaque interaction (voir
-  // `ensure_bridge_focus` plus bas), sans qu'aucun WM ne s'y oppose.
-  // Doit être réalisée AVANT d'être positionnée en override-redirect
-  // (propriété de la GdkWindow, pas du widget), donc avant `show_all`.
+  // override-redirect : hors gestion du window manager (pas de focus/
+  // reparenting imposé). Doit être posé après `realize` et avant `show_all`.
   gtk_widget_realize(bridge->host_window);
   gdk_window_set_override_redirect(gtk_widget_get_window(bridge->host_window),
                                    TRUE);
   gtk_widget_show_all(bridge->host_window);
   gtk_widget_realize(GTK_WIDGET(web_view));
 
+  bridge->draw_handler_id = g_signal_connect_after(
+      web_view, "draw", G_CALLBACK(on_web_view_draw), bridge);
   bridge->capture_timeout_id =
       g_timeout_add(kCaptureIntervalMs, capture_frame, bridge);
-
-  bridge->texture = webview_plus_pixel_buffer_texture_new(bridge);
 
   return bridge;
 }
 
 int64_t linux_texture_bridge_start(LinuxTextureBridge *bridge) {
-  fl_texture_registrar_register_texture(bridge->registrar, FL_TEXTURE(bridge->texture));
+  fl_texture_registrar_register_texture(bridge->registrar,
+                                        FL_TEXTURE(bridge->texture));
+  bridge->registered = TRUE;
   return fl_texture_get_id(FL_TEXTURE(bridge->texture));
 }
 
 void linux_texture_bridge_resize(LinuxTextureBridge *bridge, int width, int height) {
-  if (bridge == nullptr || width <= 0 || height <= 0) return;
+  if (bridge == nullptr || bridge->stopped || width <= 0 || height <= 0) return;
   gtk_widget_set_size_request(GTK_WIDGET(bridge->web_view), width, height);
   gtk_window_resize(GTK_WINDOW(bridge->host_window), width, height);
-  // Sans window manager (override-redirect), aucun "clampage" automatique
-  // à l'écran ne devrait se produire, mais on réaffirme la position par
-  // sécurité (coûte rien, évite toute mauvaise surprise selon les
-  // compositeurs/pilotes).
   gtk_window_move(GTK_WINDOW(bridge->host_window), kOffscreenX, kOffscreenY);
+  bridge->dirty_frames = 10;  // forcer une recapture à la nouvelle taille
 }
 
 namespace {
@@ -452,25 +491,34 @@ void linux_texture_bridge_dispatch_key(LinuxTextureBridge *bridge, GdkEventType 
 }
 
 void linux_texture_bridge_stop(LinuxTextureBridge *bridge) {
-  if (bridge == nullptr) return;
+  if (bridge == nullptr || bridge->stopped) return;
+  bridge->stopped = TRUE;
   if (bridge->capture_timeout_id != 0) {
     g_source_remove(bridge->capture_timeout_id);
     bridge->capture_timeout_id = 0;
   }
-  fl_texture_registrar_unregister_texture(bridge->registrar, FL_TEXTURE(bridge->texture));
+  if (bridge->draw_handler_id != 0 && bridge->web_view != nullptr) {
+    g_signal_handler_disconnect(bridge->web_view, bridge->draw_handler_id);
+    bridge->draw_handler_id = 0;
+  }
+  if (bridge->registered) {
+    fl_texture_registrar_unregister_texture(bridge->registrar,
+                                            FL_TEXTURE(bridge->texture));
+    bridge->registered = FALSE;
+  }
 }
 
 void linux_texture_bridge_free(LinuxTextureBridge *bridge) {
   if (bridge == nullptr) return;
-  g_free(bridge->frame_data);
+  linux_texture_bridge_stop(bridge);  // idempotent
   if (bridge->host_window != nullptr) {
-    // Détruit aussi `web_view`, qui lui est parenté : `destroy_linux_webview`
-    // (voir `linux_webview.cc`) ne doit donc plus appeler
-    // `gtk_widget_destroy` dessus séparément.
+    // Détruit aussi `web_view`, qui lui est parenté.
     gtk_widget_destroy(bridge->host_window);
+    bridge->host_window = nullptr;
+    bridge->web_view = nullptr;
   }
-  if (bridge->texture != nullptr) {
-    g_object_unref(bridge->texture);
-  }
+  // Le moteur détient sa propre référence tant qu'il peut encore appeler
+  // `copy_pixels` ; la texture possède ses buffers, aucun pointeur pendant.
+  g_clear_object(&bridge->texture);
   g_free(bridge);
 }

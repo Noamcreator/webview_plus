@@ -28,6 +28,9 @@ gchar *json_encode_string(const gchar *s) {
 }
 
 void invoke_method(LinuxWebview *webview, const gchar *method, FlValue *args) {
+  if (webview->disposed || webview->channel == nullptr) {
+    return;
+  }
   fl_method_channel_invoke_method(webview->channel, method, args, nullptr,
                                   nullptr, nullptr);
 }
@@ -53,6 +56,14 @@ static void js_handler_finished_cb(GObject *object, GAsyncResult *result,
 
   gchar *literal = nullptr;
   gboolean is_reject = FALSE;
+
+  if (ctx->webview->disposed) {
+    // La Webview a été détruite pendant que Dart traitait l'appel.
+    g_free(ctx->callback_id);
+    linux_webview_unref(ctx->webview);
+    g_free(ctx);
+    return;
+  }
 
   if (error != nullptr) {
     literal = json_encode_string(error->message);
@@ -82,6 +93,7 @@ static void js_handler_finished_cb(GObject *object, GAsyncResult *result,
 
   g_free(literal);
   g_free(ctx->callback_id);
+  linux_webview_unref(ctx->webview);
   g_free(ctx);
 }
 
@@ -113,8 +125,11 @@ static void js_handler_message_cb(WebKitUserContentManager *manager,
   fl_value_set_string_take(
       args, "args", fl_value_new_string(args_json != nullptr ? args_json : "[]"));
 
+  if (webview->disposed || webview->channel == nullptr) {
+    return;
+  }
   JsHandlerContext *ctx = g_new0(JsHandlerContext, 1);
-  ctx->webview = webview;
+  ctx->webview = linux_webview_ref(webview);
   ctx->callback_id = g_strdup(callback_id);
 
   fl_method_channel_invoke_method(webview->channel, "onJavaScriptHandler",
@@ -187,6 +202,9 @@ static gboolean decide_policy_cb(WebKitWebView *widget,
   }
 
   LinuxWebview *webview = static_cast<LinuxWebview *>(user_data);
+  if (webview->disposed) {
+    return FALSE;
+  }
   WebKitNavigationPolicyDecision *nav_decision =
       WEBKIT_NAVIGATION_POLICY_DECISION(decision);
   WebKitNavigationAction *action =
@@ -222,6 +240,9 @@ static gboolean decide_policy_cb(WebKitWebView *widget,
     return FALSE;
   }
 
+  if (webview->channel == nullptr) {
+    return FALSE;
+  }
   g_object_ref(decision);
   g_autoptr(FlValue) args = fl_value_new_string(uri);
   fl_method_channel_invoke_method(webview->channel, "onNavigationRequest",
@@ -633,37 +654,72 @@ void apply_user_scripts(LinuxWebview *webview, FlValue *settings) {
 
 // -- Cycle de vie -----------------------------------------------------
 
+LinuxWebview *linux_webview_ref(LinuxWebview *webview) {
+  g_atomic_int_inc(&webview->ref_count);
+  return webview;
+}
+
+void linux_webview_unref(LinuxWebview *webview) {
+  if (g_atomic_int_dec_and_test(&webview->ref_count)) {
+    g_free(webview->selection_css_color);
+    g_free(webview->selection_text_css_color);
+    g_free(webview);
+  }
+}
+
+// Appelé quand l'entrée est retirée de la table (dispose Dart ou
+// destruction du plugin). La structure elle-même n'est libérée que lorsque
+// le dernier callback asynchrone en vol relâche sa référence.
 void destroy_linux_webview(gpointer data) {
   LinuxWebview *webview = static_cast<LinuxWebview *>(data);
-  if (webview == nullptr) {
+  if (webview == nullptr || webview->disposed) {
     return;
   }
-  if (webview->web_view != nullptr) {
-    g_object_set_data(G_OBJECT(webview->web_view), kInstanceKey, nullptr);
+  webview->disposed = TRUE;
+
+  // Plus aucun signal / message ne doit atteindre `webview` après ce point.
+  if (webview->channel != nullptr) {
+    fl_method_channel_set_method_call_handler(webview->channel, nullptr,
+                                              nullptr, nullptr);
   }
+  if (webview->content_manager != nullptr) {
+    g_signal_handlers_disconnect_by_data(webview->content_manager, webview);
+  }
+  if (webview->web_view != nullptr) {
+    g_signal_handlers_disconnect_by_data(webview->web_view, webview);
+    g_object_set_data(G_OBJECT(webview->web_view), kInstanceKey, nullptr);
+    // Annule un éventuel chargement en cours avant de détruire la vue.
+    webkit_web_view_stop_loading(webview->web_view);
+  }
+
   if (webview->bridge != nullptr) {
-    // `linux_texture_bridge_free` détruit le GtkOffscreenWindow, ce qui
-    // détruit avec lui `web_view` (parenté dedans) et désenregistre la
-    // texture auprès du moteur Flutter. Remplace l'ancien
-    // `gtk_widget_destroy(webview->web_view)` + `g_object_unref` d'avant le
-    // passage en texture, où `web_view` était directement enfant du
-    // GtkOverlay superposant la Webview à la vue Flutter.
+    // `linux_texture_bridge_free` détruit la fenêtre hôte (donc `web_view`)
+    // et désenregistre la texture auprès du moteur Flutter.
     linux_texture_bridge_stop(webview->bridge);
     linux_texture_bridge_free(webview->bridge);
     webview->bridge = nullptr;
   } else if (webview->web_view != nullptr) {
     gtk_widget_destroy(GTK_WIDGET(webview->web_view));
   }
+  webview->web_view = nullptr;
+
   g_clear_object(&webview->channel);
   g_clear_object(&webview->content_manager);
-  g_free(webview->selection_css_color);
-  g_free(webview->selection_text_css_color);
-  g_free(webview);
+  linux_webview_unref(webview);  // référence initiale (table)
 }
 
 LinuxWebview *create_linux_webview(WebviewPlusPlugin *self, gint64 view_id,
                                    FlValue *creation_params) {
+  // WebKitGTK 2.42+ : le rendu DMA-BUF / mode compositing GL repose sur de
+  // vraies surfaces natives et casse (écran noir ou abort du WebProcess)
+  // dès que la Webview est hébergée hors écran puis capturée par pixels.
+  // Doit être positionné AVANT le premier lancement du WebProcess ; ne
+  // remplace jamais une valeur déjà définie par l'utilisateur (overwrite=FALSE).
+  g_setenv("WEBKIT_DISABLE_DMABUF_RENDERER", "1", FALSE);
+  g_setenv("WEBKIT_DISABLE_COMPOSITING_MODE", "1", FALSE);
+
   LinuxWebview *webview = g_new0(LinuxWebview, 1);
+  webview->ref_count = 1;
   webview->plugin = self;
   webview->view_id = view_id;
   webview->content_manager = webkit_user_content_manager_new();
@@ -709,6 +765,45 @@ LinuxWebview *create_linux_webview(WebviewPlusPlugin *self, gint64 view_id,
     // ci-dessus) sert de valeur par défaut ; `isInspectable` (par instance)
     // peut l'outrepasser explicitement à `TRUE`.
     webkit_settings_set_enable_developer_extras(webkit_settings, TRUE);
+  }
+
+  // -- Réglages jusque-là ignorés sous Linux ---------------------------------
+  // Les pages locales (`file://`) qui chargent d'autres fichiers locaux par
+  // XHR/fetch/import (cas typique d'une webapp embarquée : DocumentView.html
+  // + JS + CSS) échouent silencieusement sous WebKitGTK tant que ces deux
+  // réglages ne sont pas activés (équivalent d'`allowFileAccessFromFileURLs`
+  // / `allowUniversalAccessFromFileURLs` d'Android et d'InAppWebView).
+  webkit_settings_set_allow_file_access_from_file_urls(
+      webkit_settings,
+      map_lookup_bool(settings, "allowFileAccessFromFileURLs", FALSE));
+  webkit_settings_set_allow_universal_access_from_file_urls(
+      webkit_settings,
+      map_lookup_bool(settings, "allowUniversalAccessFromFileURLs", FALSE));
+  webkit_settings_set_media_playback_requires_user_gesture(
+      webkit_settings,
+      map_lookup_bool(settings, "mediaPlaybackRequiresUserGesture", TRUE));
+  webkit_settings_set_media_playback_allows_inline(webkit_settings, TRUE);
+  const gboolean dom_storage = map_lookup_bool(settings, "domStorageEnabled", TRUE);
+  webkit_settings_set_enable_html5_local_storage(webkit_settings, dom_storage);
+  webkit_settings_set_enable_html5_database(webkit_settings, dom_storage);
+  webkit_settings_set_javascript_can_access_clipboard(webkit_settings, TRUE);
+  webkit_settings_set_enable_smooth_scrolling(webkit_settings, TRUE);
+  if (map_lookup_bool(settings, "isInspectable", FALSE)) {
+    // En debug, les `console.log` de la page apparaissent dans le terminal
+    // `flutter run` : indispensable pour diagnostiquer une page blanche.
+    webkit_settings_set_enable_write_console_messages_to_stdout(webkit_settings, TRUE);
+  }
+
+  // `initialBackgroundColor` (ARGB) : évite le flash blanc avant le premier
+  // rendu. `transparentBackground` garde la priorité.
+  const gint64 initial_bg = map_lookup_int(settings, "initialBackgroundColor", 0);
+  if (initial_bg != 0) {
+    GdkRGBA bg = {
+        static_cast<gdouble>((initial_bg >> 16) & 0xFF) / 255.0,
+        static_cast<gdouble>((initial_bg >> 8) & 0xFF) / 255.0,
+        static_cast<gdouble>(initial_bg & 0xFF) / 255.0,
+        static_cast<gdouble>((initial_bg >> 24) & 0xFF) / 255.0};
+    webkit_web_view_set_background_color(webview->web_view, &bg);
   }
 
   if (map_lookup_bool(settings, "transparentBackground", FALSE)) {
