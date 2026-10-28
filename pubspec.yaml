@@ -6,7 +6,7 @@ repository: https://github.com/Noamcreator/webview_plus
 issue_tracker: https://github.com/Noamcreator/webview_plus/issues
 
 environment:
-  sdk: ^3.12.2
+  sdk: ^3.13.7
   flutter: '>=3.3.0'
 
 dependencies:
