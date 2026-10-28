@@ -1,6 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
-import 'package:flutter/foundation.dart' show debugPrint;
+import 'package:flutter/foundation.dart' show VoidCallback, debugPrint;
 import 'package:flutter/services.dart';
 
 import 'webview_plus_context_menu.dart';
@@ -57,6 +57,15 @@ abstract class WebviewPlusController {
 
   /// Injecte une feuille de style provenant des assets Flutter.
   Future<void> injectCSSFileFromAsset(String assetFilePath);
+
+  /// Donne le focus clavier à la Webview (ex. depuis un handler JS
+  /// `requestWebViewFocus` appelé quand l'utilisateur clique dans la page).
+  ///
+  /// Android : `WebView.requestFocus()` ; macOS : la Webview devient
+  /// first responder ; Linux/Windows : le focus Flutter est donné au widget
+  /// Webview (c'est lui qui retransmet le clavier à la vue native) ; Web :
+  /// `iframe.focus()`. Ne lève jamais d'exception.
+  Future<void> requestFocus();
 
   Future<void> reload();
   Future<void> goBack();
@@ -545,6 +554,24 @@ class WebviewBaseController implements WebviewPlusController {
   @override
   Future<void> injectCSSFileFromAsset(String assetFilePath) {
     return _channel.invokeMethod<void>('injectCSSFileFromAsset', {'assetFilePath': assetFilePath});
+  }
+
+  @override
+  /// Donne le focus au widget Webview côté Flutter. Renseigné par
+  /// `WebviewWidget` (indispensable sur Linux/Windows, où le clavier arrive
+  /// via un `Focus` Flutter puis est retransmis à la vue native).
+  VoidCallback? focusRequestHandler;
+
+  @override
+  Future<void> requestFocus() async {
+    try {
+      focusRequestHandler?.call();
+    } catch (_) {}
+    try {
+      await _channel.invokeMethod<void>('requestFocus');
+    } on MissingPluginException {
+      // Plateforme sans focus natif à donner : le focus Flutter suffit.
+    } catch (_) {}
   }
 
   @override

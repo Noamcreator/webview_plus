@@ -269,6 +269,14 @@ void handle_instance_method_call(LinuxWebview *webview,
     return;
   }
 
+  if (strcmp(method, "requestFocus") == 0) {
+    // Mode intégré : signale à WebKit qu'il est actif (focus-in synthétique) ;
+    // le focus clavier Flutter est donné côté Dart (FocusNode du widget).
+    linux_texture_bridge_request_focus(webview->bridge);
+    respond(method_call, success_response());
+    return;
+  }
+
   if (strcmp(method, "reload") == 0) {
     webview->is_navigating_internally = TRUE;
     webkit_web_view_reload(web_view);

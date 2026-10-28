@@ -1297,6 +1297,12 @@ class WebviewPlusPlatformView(
                     result.error("INVALID_ARGUMENT", "assetFilePath manquant", null)
                 }
             }
+            "requestFocus" -> {
+                webView.isFocusable = true
+                webView.isFocusableInTouchMode = true
+                webView.requestFocus()
+                result.success(null)
+            }
             "reload" -> {
                 webView.reload()
                 result.success(null)

@@ -278,7 +278,7 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
     WebviewCursorCallback? onCursorChanged,
     List<ContextMenuItem> contextMenuItems = const <ContextMenuItem>[],
   }) {
-    return WebviewBaseController.init(
+    final controller = WebviewBaseController.init(
       id,
       onNavigationRequest: widget.onNavigationRequest,
       onMessageReceived: widget.onMessageReceived,
@@ -303,6 +303,13 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
       onLoadResource: widget.onLoadResource,
       contextMenuItems: contextMenuItems,
     );
+    // Linux : le clavier passe par le FocusNode Flutter du widget.
+    controller.focusRequestHandler = () {
+      if (!kIsWeb && defaultTargetPlatform == TargetPlatform.linux) {
+        _linuxFocusNode.requestFocus();
+      }
+    };
+    return controller;
   }
 
   @override

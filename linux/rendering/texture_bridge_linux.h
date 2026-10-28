@@ -45,6 +45,9 @@ gboolean linux_texture_bridge_can_embed(FlView *view);
 LinuxTextureBridge *linux_texture_bridge_new_embedded(WebKitWebView *web_view,
                                                       FlView *view);
 gboolean linux_texture_bridge_is_embedded(LinuxTextureBridge *bridge);
+// Marque la Webview comme active (focus interne WebKit), sans voler le focus
+// clavier GTK de la FlView.
+void linux_texture_bridge_request_focus(LinuxTextureBridge *bridge);
 // Rectangle en pixels LOGIQUES, relatif à l'angle haut-gauche de la FlView.
 void linux_texture_bridge_set_rect(LinuxTextureBridge *bridge, int x, int y,
                                    int width, int height);

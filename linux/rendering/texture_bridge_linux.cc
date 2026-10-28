@@ -608,3 +608,8 @@ void linux_texture_bridge_free(LinuxTextureBridge *bridge) {
   g_clear_object(&bridge->texture);
   g_free(bridge);
 }
+
+void linux_texture_bridge_request_focus(LinuxTextureBridge *bridge) {
+  if (bridge == nullptr || bridge->stopped || bridge->web_view == nullptr) return;
+  ensure_bridge_focus(bridge);
+}

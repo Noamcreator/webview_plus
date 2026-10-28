@@ -300,6 +300,14 @@ class WebviewPlusWebController implements WebviewPlusController {
       injectCSSFileFromUrl(_resolveAssetUrl(assetFilePath));
 
   @override
+  Future<void> requestFocus() async {
+    try {
+      _iframe.focus();
+      (_win)?.callMethod<JSAny?>('focus'.toJS);
+    } catch (_) {}
+  }
+
+  @override
   Future<void> reload() async {
     _pendingReload = true;
     _onNavigationStart(Uri.parse(_iframe.hasAttribute('srcdoc') ? 'about:srcdoc' : _iframe.src));

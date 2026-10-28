@@ -923,6 +923,10 @@ class WebviewPlusPlatformView: WKWebView {
             injectCssFromUrl(assetUrl(assetFilePath))
             result(nil)
 
+        case "requestFocus":
+            // La Webview devient first responder : le clavier lui arrive.
+            window?.makeFirstResponder(self)
+            result(nil)
         case "reload":
             reload()
             result(nil)
