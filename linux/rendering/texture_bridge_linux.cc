@@ -60,6 +60,12 @@ struct _LinuxTextureBridge {
   gint64 last_capture_us;  // monotonic
   gboolean registered;
   gboolean stopped;
+
+  // Mode intégré (voir texture_bridge_linux.h) : pas de fenêtre hôte, pas de
+  // texture ; `web_view` vit dans `fixed`, sous la FlView.
+  gboolean embedded;
+  GtkWidget *fixed;
+  gboolean focus_sent;
 };
 
 // -- Sous-classe GObject de FlPixelBufferTexture --------------------------
@@ -308,7 +314,52 @@ LinuxTextureBridge *linux_texture_bridge_new(FlTextureRegistrar *registrar,
   return bridge;
 }
 
+gboolean linux_texture_bridge_can_embed(FlView *view) {
+  if (view == nullptr) return FALSE;
+  const gchar *forced = g_getenv("WEBVIEW_PLUS_LINUX_MODE");
+  if (forced != nullptr && g_ascii_strcasecmp(forced, "texture") == 0) {
+    return FALSE;
+  }
+  GtkWidget *parent = gtk_widget_get_parent(GTK_WIDGET(view));
+  if (parent == nullptr || !GTK_IS_OVERLAY(parent)) return FALSE;
+  GtkWidget *main_child = gtk_bin_get_child(GTK_BIN(parent));
+  return main_child != nullptr && GTK_IS_FIXED(main_child);
+}
+
+LinuxTextureBridge *linux_texture_bridge_new_embedded(WebKitWebView *web_view,
+                                                      FlView *view) {
+  GtkWidget *overlay = gtk_widget_get_parent(GTK_WIDGET(view));
+  GtkWidget *fixed = gtk_bin_get_child(GTK_BIN(overlay));
+
+  LinuxTextureBridge *bridge = g_new0(LinuxTextureBridge, 1);
+  bridge->web_view = web_view;
+  bridge->embedded = TRUE;
+  bridge->fixed = fixed;
+
+  // Taille de départ minimale : `setRect` (Dart) donne la vraie géométrie
+  // dès que le widget est mis en page.
+  gtk_widget_set_size_request(GTK_WIDGET(web_view), 1, 1);
+  gtk_fixed_put(GTK_FIXED(fixed), GTK_WIDGET(web_view), 0, 0);
+  gtk_widget_show(GTK_WIDGET(web_view));
+  return bridge;
+}
+
+gboolean linux_texture_bridge_is_embedded(LinuxTextureBridge *bridge) {
+  return bridge != nullptr && bridge->embedded;
+}
+
+void linux_texture_bridge_set_rect(LinuxTextureBridge *bridge, int x, int y,
+                                   int width, int height) {
+  if (bridge == nullptr || !bridge->embedded || bridge->stopped ||
+      bridge->web_view == nullptr || width <= 0 || height <= 0) {
+    return;
+  }
+  gtk_fixed_move(GTK_FIXED(bridge->fixed), GTK_WIDGET(bridge->web_view), x, y);
+  gtk_widget_set_size_request(GTK_WIDGET(bridge->web_view), width, height);
+}
+
 int64_t linux_texture_bridge_start(LinuxTextureBridge *bridge) {
+  if (bridge->embedded) return -1;  // pas de texture en mode intégré
   fl_texture_registrar_register_texture(bridge->registrar,
                                         FL_TEXTURE(bridge->texture));
   bridge->registered = TRUE;
@@ -316,7 +367,10 @@ int64_t linux_texture_bridge_start(LinuxTextureBridge *bridge) {
 }
 
 void linux_texture_bridge_resize(LinuxTextureBridge *bridge, int width, int height) {
-  if (bridge == nullptr || bridge->stopped || width <= 0 || height <= 0) return;
+  if (bridge == nullptr || bridge->stopped || bridge->embedded || width <= 0 ||
+      height <= 0) {
+    return;
+  }
   gtk_widget_set_size_request(GTK_WIDGET(bridge->web_view), width, height);
   gtk_window_resize(GTK_WINDOW(bridge->host_window), width, height);
   gtk_window_move(GTK_WINDOW(bridge->host_window), kOffscreenX, kOffscreenY);
@@ -342,6 +396,26 @@ namespace {
 // dans WebKit, sans ce problème.
 void ensure_bridge_focus(LinuxTextureBridge *bridge) {
   GtkWidget *widget = GTK_WIDGET(bridge->web_view);
+  if (bridge->embedded) {
+    // Mode intégré : la FlView garde le VRAI focus GTK (sinon plus aucun
+    // widget Flutter ne reçoit le clavier). On signale seulement à WebKit,
+    // par un événement focus-in synthétique, qu'il est "actif" (caret,
+    // couleur de sélection active, `document.hasFocus()`).
+    if (!bridge->focus_sent) {
+      if (!gtk_widget_get_realized(widget)) gtk_widget_realize(widget);
+      GdkWindow *gdk_window = gtk_widget_get_window(widget);
+      if (gdk_window != nullptr) {
+        bridge->focus_sent = TRUE;
+        GdkEvent *event = gdk_event_new(GDK_FOCUS_CHANGE);
+        event->focus_change.window = static_cast<GdkWindow *>(g_object_ref(gdk_window));
+        event->focus_change.send_event = TRUE;
+        event->focus_change.in = TRUE;
+        gtk_widget_event(widget, event);
+        gdk_event_free(event);
+      }
+    }
+    return;
+  }
   GtkWindow *window = GTK_WINDOW(bridge->host_window);
   if (gtk_window_get_focus(window) != widget) {
     gtk_widget_grab_focus(widget);
@@ -486,7 +560,13 @@ void linux_texture_bridge_dispatch_key(LinuxTextureBridge *bridge, GdkEventType 
   event->key.string = nullptr;
   event->key.group = 0;
   event->key.is_modifier = 0;
-  gtk_main_do_event(event);
+  if (bridge->embedded) {
+    // `gtk_main_do_event` route les touches vers le widget FOCUSÉ de la
+    // fenêtre (la FlView) ; on les envoie donc directement au WebKitWebView.
+    gtk_widget_event(GTK_WIDGET(bridge->web_view), event);
+  } else {
+    gtk_main_do_event(event);
+  }
   gdk_event_free(event);
 }
 
@@ -511,7 +591,13 @@ void linux_texture_bridge_stop(LinuxTextureBridge *bridge) {
 void linux_texture_bridge_free(LinuxTextureBridge *bridge) {
   if (bridge == nullptr) return;
   linux_texture_bridge_stop(bridge);  // idempotent
-  if (bridge->host_window != nullptr) {
+  if (bridge->embedded) {
+    if (bridge->web_view != nullptr) {
+      // Retire aussi le widget du GtkFixed.
+      gtk_widget_destroy(GTK_WIDGET(bridge->web_view));
+      bridge->web_view = nullptr;
+    }
+  } else if (bridge->host_window != nullptr) {
     // Détruit aussi `web_view`, qui lui est parenté.
     gtk_widget_destroy(bridge->host_window);
     bridge->host_window = nullptr;

@@ -1,12 +1,12 @@
 name: webview_plus
 description: A cross-platform Flutter plugin that directly encapsulates native WebViews (Android, iOS/macOS, Windows, Linux andWeb) with no WebView dependencies.
-version: 0.8.8
+version: 0.9.0
 homepage: https://github.com/Noamcreator/webview_plus
 repository: https://github.com/Noamcreator/webview_plus
 issue_tracker: https://github.com/Noamcreator/webview_plus/issues
 
 environment:
-  sdk: ^3.13.7
+  sdk: ^3.12.2
   flutter: '>=3.3.0'
 
 dependencies:

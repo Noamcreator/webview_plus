@@ -2,6 +2,7 @@ package me.noam.webview_plus
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.content.MutableContextWrapper
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.os.Handler
@@ -10,9 +11,12 @@ import android.view.ActionMode
 import android.view.ContextThemeWrapper
 import android.view.Menu
 import android.view.View
+import android.util.Base64
 import android.webkit.JavascriptInterface
+import android.webkit.WebChromeClient
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -41,12 +45,79 @@ import io.flutter.plugin.platform.PlatformView
 import org.json.JSONArray
 import org.json.JSONObject
 import org.json.JSONTokener
+import java.io.ByteArrayInputStream
+import java.io.File
 import java.util.Collections
 import java.util.WeakHashMap
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
+
+/// File d'attente des événements natif -> Dart.
+///
+/// Les événements (`onLoadStart`, `onDOMContentLoaded`, appels
+/// `callHandler`...) sont conservés tant que Dart n'a pas signalé qu'il
+/// est prêt (méthode `ready`, appelée par `WebviewWidget` après
+/// `onWebViewCreated`) puis livrés dans l'ordre. Cela corrige deux
+/// problèmes : (1) une page locale qui charge plus vite que la création du
+/// contrôleur Dart perdait `onLoadStart`/`onDOMContentLoaded` ; (2) un
+/// `callHandler` JS pouvait atteindre Dart avant `addJavaScriptHandler`.
+/// C'est aussi ce qui permet de précharger une page dans une Webview
+/// détachée (sans canal) et de lui rejouer ses événements à l'adoption.
+internal class WebviewPlusEventChannel {
+    private class PendingCall(
+        val method: String,
+        val args: Any?,
+        val callback: MethodChannel.Result?
+    )
+
+    private var channel: MethodChannel? = null
+    private var ready = false
+    private val pending = ArrayList<PendingCall>()
+    private val handler = Handler(Looper.getMainLooper())
+
+    companion object {
+        // Si Dart n'a jamais signalé `ready` (ancienne version côté Dart,
+        // exception dans onWebViewCreated...), on livre quand même.
+        private const val READY_TIMEOUT_MS = 3_000L
+    }
+
+    fun bind(channel: MethodChannel, callHandler: MethodChannel.MethodCallHandler) {
+        this.channel = channel
+        channel.setMethodCallHandler(callHandler)
+        handler.postDelayed({ markReady() }, READY_TIMEOUT_MS)
+    }
+
+    fun markReady() {
+        if (ready) return
+        ready = true
+        val ch = channel ?: return
+        val toSend = ArrayList(pending)
+        pending.clear()
+        for (call in toSend) {
+            ch.invokeMethod(call.method, call.args, call.callback)
+        }
+    }
+
+    fun invokeMethod(method: String, args: Any?, callback: MethodChannel.Result? = null) {
+        val ch = channel
+        if (!ready || ch == null) {
+            pending.add(PendingCall(method, args, callback))
+            return
+        }
+        ch.invokeMethod(method, args, callback)
+    }
+
+    fun unbind() {
+        channel?.setMethodCallHandler(null)
+        channel = null
+        pending.clear()
+    }
+}
 
 class WebviewPlusPlatformView(
     context: Context,
-    messenger: BinaryMessenger,
+    messenger: BinaryMessenger?,
     viewId: Int,
     creationParams: Map<String, Any?>?,
     preWarmedWebView: WebView? = null
@@ -85,8 +156,19 @@ class WebviewPlusPlatformView(
     // étant déjà figé au moment du `warmUp`.
     private val webView: WebView = preWarmedWebView
         ?: WebView(ContextThemeWrapper(context, R.style.WebviewPlusSelectionTheme))
-    private val channel = MethodChannel(messenger, "webview_plus_$viewId")
+    private val channel = WebviewPlusEventChannel()
     private val mainHandler = Handler(Looper.getMainLooper())
+
+    /// Empreinte des paramètres de création (voir
+    /// `WebviewPlusPreloader.preloadKeyFor` côté Dart) : une Webview
+    /// préchargée n'est adoptée que par un widget ayant la même.
+    val preloadKey: String? = creationParams?.get("preloadKey") as? String
+
+    // -- Interception de ressources (`onLoadResource`) -----------------------
+    private var interceptResources = false
+    private var interceptedExtensions: Set<String> = setOf(
+        "jpg", "jpeg", "png", "gif", "webp", "svg", "bmp", "ico"
+    )
 
     // -- Réglages dérivés de `initialSettings` -----------------------------
     private var disableContextMenu = false
@@ -128,7 +210,16 @@ class WebviewPlusPlatformView(
 
     init {
         registry[webView] = this
-        channel.setMethodCallHandler(this)
+        // Instance issue du pool/préchargement : son Context est un
+        // MutableContextWrapper(app) ; on le rebranche sur l'Activité pour
+        // que thème (poignées de sélection), dialogues et IME fonctionnent
+        // comme sur une Webview créée normalement.
+        (webView.context as? MutableContextWrapper)?.baseContext =
+            ContextThemeWrapper(context, R.style.WebviewPlusSelectionTheme)
+        if (messenger != null) {
+            channel.bind(MethodChannel(messenger, "webview_plus_$viewId"), this)
+        }
+        interceptResources = (creationParams?.get("hasLoadResourceCallback") as? Boolean) == true
 
         @Suppress("UNCHECKED_CAST")
         val settings = creationParams?.get("initialSettings") as? Map<String, Any?>
@@ -154,6 +245,16 @@ class WebviewPlusPlatformView(
             initialData != null -> loadInitialData(initialData)
             else -> {}
         }
+    }
+
+    /// Rattache une Webview préchargée (créée détachée par
+    /// `WebviewPlusPreloader.preloadDocument`) au canal de la vue Flutter qui
+    /// l'adopte. Les événements déjà survenus sont rejoués par
+    /// `WebviewPlusEventChannel.markReady` dès que Dart est prêt.
+    fun attach(messenger: BinaryMessenger, viewId: Int, hostContext: Context) {
+        (webView.context as? MutableContextWrapper)?.baseContext =
+            ContextThemeWrapper(hostContext, R.style.WebviewPlusSelectionTheme)
+        channel.bind(MethodChannel(messenger, "webview_plus_$viewId"), this)
     }
 
     /// Charge le contenu initial fourni via `WebviewWidget(initialData: ...)`
@@ -215,9 +316,18 @@ class WebviewPlusPlatformView(
         // Doit être fait APRES `applySettings` (qui remplit
         // `userScriptsAtStart`) et AVANT tout `loadUrl`/`loadFile` déclenché
         // plus bas dans `init {}`.
-        if (userScriptsAtStart.isNotEmpty() &&
-            WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)
-        ) {
+        if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
+            // Le pont `window.webview_plus` est lui aussi injecté nativement
+            // au démarrage du document (et AVANT les scripts utilisateur,
+            // qui peuvent l'utiliser) : il est garanti présent avant le
+            // premier script de la page, sans l'aller-retour asynchrone de
+            // `evaluateJavascript` depuis `onPageStarted` (conservé plus
+            // bas en simple filet de sécurité, il est idempotent).
+            WebViewCompat.addDocumentStartJavaScript(
+                webView,
+                buildBridgeScript(includeStartUserScripts = false),
+                setOf("*")
+            )
             userScriptsAtStart.forEach { source ->
                 WebViewCompat.addDocumentStartJavaScript(
                     webView,
@@ -311,10 +421,52 @@ class WebviewPlusPlatformView(
 
         setupContextMenuHandling()
 
+        webView.webChromeClient = object : WebChromeClient() {
+            override fun onProgressChanged(view: WebView, newProgress: Int) {
+                mainHandler.post { channel.invokeMethod("onProgressChanged", newProgress) }
+            }
+        }
+
         webView.webViewClient = object : WebViewClient() {
             override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
                 injectBridgeScript()
                 mainHandler.post { channel.invokeMethod("onLoadStart", url) }
+            }
+
+            // Navigation validée (le nouveau document reçoit son contenu).
+            override fun doUpdateVisitedHistory(view: WebView, url: String, isReload: Boolean) {
+                mainHandler.post { channel.invokeMethod("onContentLoading", url) }
+            }
+
+            // Le premier contenu de la nouvelle page est prêt à être peint.
+            override fun onPageCommitVisible(view: WebView, url: String) {
+                mainHandler.post { channel.invokeMethod("onPageCommitVisible", url) }
+            }
+
+            override fun onReceivedHttpError(
+                view: WebView,
+                request: WebResourceRequest,
+                errorResponse: WebResourceResponse
+            ) {
+                if (request.isForMainFrame && errorResponse.statusCode >= 400) {
+                    mainHandler.post {
+                        channel.invokeMethod(
+                            "onLoadError",
+                            mapOf(
+                                "url" to request.url.toString(),
+                                "code" to errorResponse.statusCode,
+                                "description" to (errorResponse.reasonPhrase ?: "HTTP ${errorResponse.statusCode}")
+                            )
+                        )
+                    }
+                }
+            }
+
+            override fun shouldInterceptRequest(
+                view: WebView,
+                request: WebResourceRequest
+            ): WebResourceResponse? {
+                return interceptLocalResource(request)
             }
 
             override fun onPageFinished(view: WebView, url: String) {
@@ -439,6 +591,23 @@ class WebviewPlusPlatformView(
         isTransparentBackground = (settings?.get("transparentBackground") as? Boolean) == true
         if (isTransparentBackground) {
             webView.setBackgroundColor(Color.TRANSPARENT)
+        } else {
+            // `initialBackgroundColor` n'était pas appliqué sur Android : la
+            // Webview restait blanche jusqu'au premier rendu (flash blanc en
+            // thème sombre). On la peint de la couleur attendue dès le
+            // premier frame.
+            val initialBackground = when (val raw = settings?.get("initialBackgroundColor")) {
+                is Int -> raw
+                is Long -> raw.toInt()
+                else -> null
+            }
+            if (initialBackground != null) {
+                webView.setBackgroundColor(initialBackground)
+            }
+        }
+
+        (settings?.get("interceptedResourceExtensions") as? List<*>)?.let { list ->
+            interceptedExtensions = list.mapNotNull { (it as? String)?.lowercase() }.toSet()
         }
 
         if ((settings?.get("isInspectable") as? Boolean) == true) {
@@ -678,6 +847,13 @@ class WebviewPlusPlatformView(
     /// `window.webview_plus.callHandler(...)` ainsi que le CSS de
     /// couleur de sélection s'il a été configuré.
     private fun injectBridgeScript() {
+        webView.evaluateJavascript(
+            buildBridgeScript(includeStartUserScripts = !documentStartScriptsInjectedNatively),
+            null
+        )
+    }
+
+    private fun buildBridgeScript(includeStartUserScripts: Boolean): String {
         val cssInjection = selectionCssColor?.let { color ->
             """
             var __fwStyle = document.createElement('style');
@@ -703,7 +879,7 @@ class WebviewPlusPlatformView(
         // on NE LE RÉINJECTE PAS ici pour éviter une double exécution.
         // On ne garde ce fallback `evaluateJavascript` que pour les
         // appareils ne supportant pas l'API native.
-        val startUserScripts = if (documentStartScriptsInjectedNatively) {
+        val startUserScripts = if (!includeStartUserScripts) {
             ""
         } else {
             userScriptsAtStart.joinToString("\n") { "(function(){ $it })();" }
@@ -778,7 +954,84 @@ class WebviewPlusPlatformView(
               };
             })();
         """.trimIndent()
-        webView.evaluateJavascript(js, null)
+        return js
+    }
+
+    // -- onLoadResource -------------------------------------------------------
+
+    private fun mimeTypeFor(ext: String): String = when (ext) {
+        "jpg", "jpeg" -> "image/jpeg"
+        "png" -> "image/png"
+        "gif" -> "image/gif"
+        "webp" -> "image/webp"
+        "svg" -> "image/svg+xml"
+        "bmp" -> "image/bmp"
+        "ico" -> "image/x-icon"
+        else -> "application/octet-stream"
+    }
+
+    /// Appelé sur un thread réseau de Chromium pour chaque requête. Ne
+    /// traite que les sous-ressources `file://` dont l'extension est dans
+    /// `interceptedExtensions` ET seulement si Dart a fourni
+    /// `onLoadResource` (sinon `null` : Chromium charge normalement, sans
+    /// coût). Les octets partent vers Dart (Base64) qui peut les remplacer.
+    private fun interceptLocalResource(request: WebResourceRequest): WebResourceResponse? {
+        if (!interceptResources || request.isForMainFrame || request.method != "GET") return null
+        val uri = request.url
+        if (uri.scheme != "file") return null
+        val path = uri.path ?: return null
+        val ext = path.substringAfterLast('.', "").lowercase()
+        if (!interceptedExtensions.contains(ext)) return null
+        val file = File(path)
+        if (!file.isFile) return null
+        return try {
+            val original = file.readBytes()
+            val bytes = askDartForResource(uri.toString(), original) ?: original
+            WebResourceResponse(
+                mimeTypeFor(ext),
+                null,
+                200,
+                "OK",
+                mapOf("Access-Control-Allow-Origin" to "*"),
+                ByteArrayInputStream(bytes)
+            )
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private fun askDartForResource(url: String, data: ByteArray): ByteArray? {
+        val payload = mapOf("url" to url, "data" to Base64.encodeToString(data, Base64.NO_WRAP))
+        val latch = CountDownLatch(1)
+        val answer = AtomicReference<String?>(null)
+        mainHandler.post {
+            channel.invokeMethod(
+                "onLoadResource",
+                payload,
+                object : MethodChannel.Result {
+                    override fun success(result: Any?) {
+                        answer.set(result as? String)
+                        latch.countDown()
+                    }
+
+                    override fun error(code: String, message: String?, details: Any?) {
+                        latch.countDown()
+                    }
+
+                    override fun notImplemented() {
+                        latch.countDown()
+                    }
+                }
+            )
+        }
+        if (!latch.await(10, TimeUnit.SECONDS)) return null
+        val encoded = answer.get()
+        if (encoded.isNullOrEmpty()) return null
+        return try {
+            Base64.decode(encoded, Base64.DEFAULT)
+        } catch (e: IllegalArgumentException) {
+            null
+        }
     }
 
     private fun handleNavigationRequest(url: String) {
@@ -888,7 +1141,7 @@ class WebviewPlusPlatformView(
 
     override fun dispose() {
         registry.remove(webView)
-        channel.setMethodCallHandler(null)
+        channel.unbind()
         webView.webViewClient = WebViewClient()
         webView.clearHistory()
         webView.loadUrl("about:blank")
@@ -898,6 +1151,10 @@ class WebviewPlusPlatformView(
 
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
         when (call.method) {
+            "ready" -> {
+                channel.markReady()
+                result.success(null)
+            }
             "loadUrl" -> {
                 val url = call.argument<String>("url")
                 if (url != null) {

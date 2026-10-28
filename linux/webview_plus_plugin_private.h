@@ -70,6 +70,15 @@ typedef struct {
   gchar *selection_text_css_color;
   gboolean disable_printing;
 
+  // `onLoadResource` (voir `WebviewSettings.interceptedResourceExtensions`) :
+  // actif seulement si Dart a fourni le callback.
+  gboolean intercept_resources;
+
+  // Mode intégré : le WebKitWebView est un vrai widget GTK sous la FlView
+  // (pas de texture). Voir `rendering/texture_bridge_linux.h`.
+  gboolean embedded;
+  gchar **intercepted_extensions;  // NULL-terminated, minuscules
+
   // Empêche de renvoyer `onNavigationRequest` pour les navigations
   // déclenchées nous-mêmes (loadUrl/reload/goBack/goForward/...), pour
   // éviter une boucle infinie. Cf. équivalent Android/iOS/macOS.

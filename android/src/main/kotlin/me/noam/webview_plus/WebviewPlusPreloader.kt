@@ -2,6 +2,8 @@ package me.noam.webview_plus
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.content.MutableContextWrapper
+import android.view.ContextThemeWrapper
 import android.os.Handler
 import android.os.Looper
 import android.webkit.WebSettings
@@ -35,6 +37,15 @@ import android.webkit.WebViewClient
 ///    `Cache-Control`/`ETag` le permettent sont servies depuis le cache
 ///    local au lieu d'être retéléchargées. Ces instances sont détruites
 ///    peu après pour ne pas consommer de mémoire inutilement.
+///
+/// 3. `preloadedPages` (voir [preloadDocument] / [acquirePreloaded]) : une
+///    `WebviewPlusPlatformView` COMPLÈTE (réglages, ponts JS, CSS initial)
+///    créée détachée et qui charge déjà la page demandée. Son
+///    `WebviewPlusEventChannel` garde les événements jusqu'à ce qu'un
+///    `WebviewWidget` Dart de mêmes paramètres l'adopte (`attach`) et
+///    signale `ready` : la page (HTML + centaines de Ko de JS analysés)
+///    est alors déjà prête, ce qui rend l'ouverture quasi instantanée. Une
+///    instance de remplacement est rechargée en arrière-plan ensuite.
 object WebviewPlusPreloader {
 
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -52,6 +63,28 @@ object WebviewPlusPreloader {
     // froid.
     private var appContextRef: Context? = null
     private var targetPoolSize: Int = 0
+
+    // Pages préchargées (voir 3.) et paramètres de la dernière demande,
+    // gardés pour recharger une instance après chaque adoption.
+    private val preloadedPages = ArrayList<WebviewPlusPlatformView>()
+    private var lastPreloadParams: Map<String, Any?>? = null
+    private const val PRELOAD_REFILL_DELAY_MS = 1_500L
+
+    /// WebView dont le Context est un `MutableContextWrapper` : rebranché
+    /// sur l'Activité à l'adoption (voir `WebviewPlusPlatformView`), ce qui
+    /// rétablit thème de sélection, dialogues et IME qu'une WebView créée
+    /// avec le seul Context applicatif ne peut pas avoir.
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun newDetachedWebView(appContext: Context): WebView {
+        val wrapper = MutableContextWrapper(
+            ContextThemeWrapper(appContext, R.style.WebviewPlusSelectionTheme)
+        )
+        val webView = WebView(wrapper)
+        webView.settings.javaScriptEnabled = true
+        webView.settings.domStorageEnabled = true
+        webView.settings.cacheMode = WebSettings.LOAD_DEFAULT
+        return webView
+    }
 
     // Durée après laquelle une Webview de préchargement réseau est détruite
     // si elle n'a pas déjà été nettoyée par `onPageFinished`. Filet de
@@ -74,11 +107,7 @@ object WebviewPlusPreloader {
         val missing = count - enginePool.size
         if (missing <= 0) return
         repeat(missing) {
-            val webView = WebView(appContext)
-            webView.settings.javaScriptEnabled = true
-            webView.settings.domStorageEnabled = true
-            webView.settings.cacheMode = WebSettings.LOAD_DEFAULT
-            enginePool.addLast(webView)
+            enginePool.addLast(newDetachedWebView(appContext))
         }
     }
 
@@ -106,6 +135,50 @@ object WebviewPlusPreloader {
         // consommer une WebView du pool) avant de reconstruire, pour ne
         // jamais entrer en concurrence avec elle sur le thread principal.
         mainHandler.post { warmUp(context, targetPoolSize) }
+    }
+
+    /// Crée une page préchargée (voir 3. dans la doc de l'objet). [params]
+    /// est exactement la `Map` de création que Dart passerait à une vue
+    /// native (dont `preloadKey`). Idempotent par `preloadKey`. Thread
+    /// principal (redirige sinon).
+    fun preloadDocument(context: Context, params: Map<String, Any?>) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            mainHandler.post { preloadDocument(context, params) }
+            return
+        }
+        val key = params["preloadKey"] as? String ?: return
+        val appContext = context.applicationContext
+        appContextRef = appContext
+        lastPreloadParams = params
+        if (preloadedPages.any { it.preloadKey == key }) return
+        // Une seule page préchargée par clé suffit ; on borne le total pour
+        // ne pas accumuler de Webviews si les paramètres changent souvent
+        // (ex. bascule clair/sombre) : la plus ancienne est détruite.
+        while (preloadedPages.size >= 2) {
+            preloadedPages.removeAt(0).dispose()
+        }
+        val webView = enginePool.removeFirstOrNull() ?: newDetachedWebView(appContext)
+        preloadedPages.add(
+            WebviewPlusPlatformView(appContext, null, -1, params, webView)
+        )
+    }
+
+    /// Retire et renvoie la page préchargée de clé [key], ou `null`.
+    /// Planifie le rechargement d'une instance équivalente pour le document
+    /// suivant, hors du chemin critique de l'ouverture en cours.
+    fun acquirePreloaded(key: String): WebviewPlusPlatformView? {
+        val index = preloadedPages.indexOfFirst { it.preloadKey == key }
+        if (index < 0) return null
+        val page = preloadedPages.removeAt(index)
+        val context = appContextRef
+        val params = lastPreloadParams
+        if (context != null && params != null) {
+            mainHandler.postDelayed(
+                { preloadDocument(context, params) },
+                PRELOAD_REFILL_DELAY_MS
+            )
+        }
+        return page
     }
 
     /// Déclenche un préchargement réseau best-effort de [url] : les
@@ -159,6 +232,9 @@ object WebviewPlusPreloader {
     /// en cours). Utile en tests, ou si l'app veut libérer explicitement la
     /// mémoire associée (ex. `onTrimMemory`).
     fun clear() {
+        preloadedPages.forEach { it.dispose() }
+        preloadedPages.clear()
+        lastPreloadParams = null
         enginePool.forEach { it.destroy() }
         enginePool.clear()
         activePreloads.keys.toList().forEach { disposePreload(it) }

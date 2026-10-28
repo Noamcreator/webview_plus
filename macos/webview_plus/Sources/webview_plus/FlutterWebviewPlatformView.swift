@@ -45,6 +45,14 @@ class WebviewPlusPlatformView: WKWebView {
 
     // -- Réglages dérivés de `initialSettings` ------------------------------
     private var disableContextMenu = false
+
+    /// Voir `WebviewSettings.disableRightClickSelection` : le clic droit (et
+    /// Ctrl+clic) n'est plus transmis à WebKit, qui ne sélectionne donc
+    /// plus le mot sous le curseur avant d'ouvrir le menu contextuel.
+    private var disableRightClickSelection = false
+
+    /// Observation de `estimatedProgress` -> `onProgressChanged` (0...100).
+    private var progressObservation: NSKeyValueObservation?
     private var disableLongPressLinks = false
     private var selectionCssColor: String?
     private var selectionTextCssColor: String?
@@ -91,6 +99,10 @@ class WebviewPlusPlatformView: WKWebView {
         configuration.setURLSchemeHandler(resourceHandler, forURLScheme: "app-assets")
 
         let settings = creationParams?["initialSettings"] as? [String: Any?]
+        if let extensions = settings?["interceptedResourceExtensions"] as? [String] {
+            resourceHandler.interceptedExtensions = Set(extensions.map { $0.lowercased() })
+        }
+        let hasLoadResourceCallback = (creationParams?["hasLoadResourceCallback"] as? Bool) ?? false
         
         let jsEnabled = (settings?["javaScriptEnabled"] as? Bool) ?? true
         if #available(macOS 11.0, *) {
@@ -164,6 +176,37 @@ class WebviewPlusPlatformView: WKWebView {
             LeakAvoidingScriptMessageHandler(self), name: "WebviewPlusDomContentLoaded")
         userContentController.add(
             LeakAvoidingScriptMessageHandler(self), name: "WebviewPlusFontsLoaded")
+        userContentController.add(
+            LeakAvoidingScriptMessageHandler(self), name: "WebviewPlusPageCommitVisible")
+
+        // `onLoadResource` : les octets des ressources `app-assets://` dont
+        // l'extension est interceptée partent vers Dart (Base64), qui peut
+        // renvoyer des octets de remplacement. Branché SEULEMENT si le
+        // widget a fourni le callback (aucun coût sinon).
+        if hasLoadResourceCallback {
+            resourceHandler.onResource = { [weak self] url, data, completion in
+                guard let self = self else {
+                    completion(nil)
+                    return
+                }
+                self.channel.invokeMethod(
+                    "onLoadResource",
+                    arguments: ["url": url, "data": data.base64EncodedString()]
+                ) { response in
+                    if let encoded = response as? String, !encoded.isEmpty {
+                        completion(Data(base64Encoded: encoded))
+                    } else {
+                        completion(nil)
+                    }
+                }
+            }
+        }
+
+        // Progression du chargement (0...100) -> `onProgressChanged`.
+        progressObservation = observe(\.estimatedProgress, options: [.new]) { [weak self] webView, _ in
+            let percent = Int((webView.estimatedProgress * 100).rounded())
+            self?.channel.invokeMethod("onProgressChanged", arguments: percent)
+        }
 
         applySettings(settings)
 
@@ -286,6 +329,12 @@ class WebviewPlusPlatformView: WKWebView {
             // transparent pour laisser voir le contenu Flutter derrière).
             setValue(false, forKey: "drawsBackground")
             layer?.backgroundColor = cgColor(fromArgb: bgColorValue)
+            // Couleur visible sous la page (chargement, rebond/overscroll) :
+            // sans elle WebKit peint son blanc/noir système avant le premier
+            // rendu, d'où le flash au démarrage.
+            if #available(macOS 12.0, *), let color = NSColor(cgColor: cgColor(fromArgb: bgColorValue)) {
+                underPageBackgroundColor = color
+            }
         }
 
         if let userAgent = settings?["userAgent"] as? String {
@@ -312,6 +361,7 @@ class WebviewPlusPlatformView: WKWebView {
         }
 
         disableContextMenu = (settings?["disableContextMenu"] as? Bool) ?? false
+        disableRightClickSelection = (settings?["disableRightClickSelection"] as? Bool) ?? false
         disableLongPressLinks = (settings?["disableLongPressContextMenuOnLinks"] as? Bool) ?? false
         disablePrinting = (settings?["disablePrinting"] as? Bool) ?? false
 
@@ -453,6 +503,33 @@ class WebviewPlusPlatformView: WKWebView {
         return super.menu(for: event)
     }
 
+    // MARK: - Clic droit sans sélection (`disableRightClickSelection`)
+    //
+    // WebKit sélectionne le mot sous le curseur au clic droit AVANT de
+    // construire le menu, ce que `menu(for:)` ne peut pas empêcher. On ne
+    // transmet donc pas du tout ces événements à WebKit. Sur macOS,
+    // Ctrl+clic est un clic droit : même traitement.
+
+    override func rightMouseDown(with event: NSEvent) {
+        if disableRightClickSelection { return }
+        super.rightMouseDown(with: event)
+    }
+
+    override func rightMouseUp(with event: NSEvent) {
+        if disableRightClickSelection { return }
+        super.rightMouseUp(with: event)
+    }
+
+    override func rightMouseDragged(with event: NSEvent) {
+        if disableRightClickSelection { return }
+        super.rightMouseDragged(with: event)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        if disableRightClickSelection && event.modifierFlags.contains(.control) { return }
+        super.mouseDown(with: event)
+    }
+
     /// Filet de sécurité : si un menu a malgré tout été construit (chemin
     /// interne différent selon la version de WebKit), on le vide et on
     /// annule explicitement son affichage plutôt que de le laisser
@@ -531,6 +608,17 @@ class WebviewPlusPlatformView: WKWebView {
             __fwNotifyDomContentLoaded();
           }
 
+          // Premier rendu de la page (équivalent d'`onPageCommitVisible`
+          // Android) : deux `requestAnimationFrame` après le démarrage du
+          // document garantissent qu'une frame a été produite.
+          try {
+            requestAnimationFrame(function() {
+              requestAnimationFrame(function() {
+                window.webkit.messageHandlers.WebviewPlusPageCommitVisible.postMessage(window.location.href);
+              });
+            });
+          } catch (e) {}
+
           if (window.document.fonts && window.document.fonts.ready) {
             window.document.fonts.ready.then(function(fontFaceSet) {
               var families = [];
@@ -587,6 +675,10 @@ class WebviewPlusPlatformView: WKWebView {
         case "WebviewPlusLinkHover":
             if let state = message.body as? String {
                 isHoveringLink = (state == "enter")
+            }
+        case "WebviewPlusPageCommitVisible":
+            if let url = message.body as? String {
+                channel.invokeMethod("onPageCommitVisible", arguments: url)
             }
         case "WebviewPlusDomContentLoaded":
             if let url = message.body as? String {
@@ -892,6 +984,30 @@ extension WebviewPlusPlatformView: WKNavigationDelegate {
         channel.invokeMethod("onLoadStart", arguments: webView.url?.absoluteString ?? "")
     }
 
+    // Navigation validée : le nouveau document commence à recevoir son
+    // contenu (équivalent de `ContentLoading` de WebView2).
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        channel.invokeMethod("onContentLoading", arguments: webView.url?.absoluteString ?? "")
+    }
+
+    // Statut HTTP >= 400 sur le document principal -> `onLoadError`.
+    func webView(
+        _ webView: WKWebView,
+        decidePolicyFor navigationResponse: WKNavigationResponse,
+        decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void
+    ) {
+        if navigationResponse.isForMainFrame,
+           let http = navigationResponse.response as? HTTPURLResponse,
+           http.statusCode >= 400 {
+            channel.invokeMethod("onLoadError", arguments: [
+                "url": http.url?.absoluteString ?? "",
+                "code": http.statusCode,
+                "description": HTTPURLResponse.localizedString(forStatusCode: http.statusCode)
+            ])
+        }
+        decisionHandler(.allow)
+    }
+
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         channel.invokeMethod("onLoadStop", arguments: webView.url?.absoluteString ?? "")
     }
@@ -997,54 +1113,76 @@ enum JsonLiteral {
 /// Intercepte les requêtes réseau en tâche de fond pour notifier Dart (Base64) 
 /// sans altérer le cycle de rendu de la page.
 class WebviewPlusResourceSchemeHandler: NSObject, WKURLSchemeHandler {
-    
+
+    /// `(url, octets, completion)` : doit appeler `completion` EXACTEMENT une
+    /// fois, avec les octets de remplacement ou `nil` pour servir la
+    /// ressource d'origine. `nil` (défaut) = aucune interception.
+    var onResource: ((String, Data, @escaping (Data?) -> Void) -> Void)?
+
+    /// Seules ces extensions sont transmises à `onResource` (jamais le
+    /// HTML/JS/CSS : inutile et coûteux de les encoder en Base64).
+    var interceptedExtensions: Set<String> = ["jpg", "jpeg", "png", "gif", "webp", "svg", "bmp", "ico"]
+
+    /// Tâches annulées par WebKit (`stop`). Répondre à une tâche arrêtée
+    /// lève une exception Objective-C : on l'évite.
+    private var stoppedTasks = Set<ObjectIdentifier>()
+
     func webView(_ webView: WKWebView, start urlSchemeTask: WKURLSchemeTask) {
+        // Un identifiant mémoire peut être réutilisé par une nouvelle tâche :
+        // on oublie tout `stop` antérieur portant le même identifiant.
+        stoppedTasks.remove(ObjectIdentifier(urlSchemeTask as AnyObject))
+
         guard let url = urlSchemeTask.request.url else {
             urlSchemeTask.didFailWithError(NSError(domain: NSCocoaErrorDomain, code: NSURLErrorBadURL, userInfo: nil))
             return
         }
-        
+
         // Si l'URL utilise notre schéma personnalisé
         if url.scheme == "app-assets" {
             // On reconstruit l'URL au format file:// pour pouvoir lire le fichier sur le disque
             var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
             components?.scheme = "file"
-            
-            if let fileUrl = components?.url {
-                let filePath = fileUrl.path
-                
-                if FileManager.default.fileExists(atPath: filePath) {
-                    // C'EST ICI que votre événement onLoadResource peut être notifié à Dart si besoin !
-                    
-                    // On détermine le type MIME (Optionnel mais recommandé pour les images)
-                    let mimeType = getMimeType(for: fileUrl)
-                    
-                    if let data = try? Data(contentsOf: fileUrl) {
-                        let response = URLResponse(
-                            url: url,
-                            mimeType: mimeType,
-                            expectedContentLength: data.count,
-                            textEncodingName: nil
-                        )
-                        
-                        // On renvoie les données à la WebView
-                        urlSchemeTask.didReceive(response)
-                        urlSchemeTask.didReceive(data)
-                        urlSchemeTask.didFinish()
-                        return
-                    }
+
+            if let fileUrl = components?.url,
+               FileManager.default.fileExists(atPath: fileUrl.path),
+               let data = try? Data(contentsOf: fileUrl) {
+                let mimeType = getMimeType(for: fileUrl)
+                let taskId = ObjectIdentifier(urlSchemeTask as AnyObject)
+
+                let respond: (Data) -> Void = { [weak self] bytes in
+                    guard let self = self else { return }
+                    if self.stoppedTasks.remove(taskId) != nil { return }
+                    let response = URLResponse(
+                        url: url,
+                        mimeType: mimeType,
+                        expectedContentLength: bytes.count,
+                        textEncodingName: nil
+                    )
+                    urlSchemeTask.didReceive(response)
+                    urlSchemeTask.didReceive(bytes)
+                    urlSchemeTask.didFinish()
                 }
+
+                if let onResource = onResource,
+                   interceptedExtensions.contains(fileUrl.pathExtension.lowercased()) {
+                    onResource(url.absoluteString, data) { replacement in
+                        respond(replacement ?? data)
+                    }
+                } else {
+                    respond(data)
+                }
+                return
             }
         }
-        
+
         // Si le fichier n'existe pas ou n'a pas pu être lu
         urlSchemeTask.didFailWithError(NSError(domain: NSCocoaErrorDomain, code: NSFileReadNoSuchFileError, userInfo: nil))
     }
-    
+
     func webView(_ webView: WKWebView, stop urlSchemeTask: WKURLSchemeTask) {
-        // Logique d'arrêt si la requête est annulée par la WebView
+        stoppedTasks.insert(ObjectIdentifier(urlSchemeTask as AnyObject))
     }
-    
+
     // Fonction utilitaire pour obtenir le MimeType d'un fichier (ex: image/jpeg)
     private func getMimeType(for url: URL) -> String {
         let pathExtension = url.pathExtension.lowercased()

@@ -52,6 +52,22 @@ class WebviewPlusPlugin : FlutterPlugin, ActivityAware {
                         result.success(null)
                     }
                 }
+                "preloadDocument" -> {
+                    @Suppress("UNCHECKED_CAST")
+                    val params = call.arguments as? Map<String, Any?>
+                    if (ctx == null) {
+                        result.error("NO_CONTEXT", "Plugin non attaché", null)
+                    } else if (params == null) {
+                        result.error("INVALID_ARGUMENT", "paramètres manquants", null)
+                    } else {
+                        WebviewPlusPreloader.preloadDocument(ctx, params)
+                        result.success(null)
+                    }
+                }
+                "clearPreloads" -> {
+                    WebviewPlusPreloader.clear()
+                    result.success(null)
+                }
                 "preloadUrl" -> {
                     val url = call.argument<String>("url")
                     if (ctx == null) {

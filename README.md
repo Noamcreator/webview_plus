@@ -400,3 +400,71 @@ For a complete working deployment showcase showcasing full bidirectional communi
 ## 📄 License
 
 Developed by Noam. Licensed under standard project conditions.
+
+## Web
+
+Sur Web, `WebviewWidget` affiche une `<iframe>` (via `HtmlElementView`) avec la même API Dart.
+
+```dart
+WebviewWidget(
+  // Webapp embarquée : déclarez le dossier dans pubspec.yaml (assets: - assets/webapp/)
+  initialAsset: 'assets/webapp/DocumentView.html',
+  initialCss: 'body { background: #121212; }',
+  onWebViewCreated: (c) => c.addJavaScriptHandler(
+    handlerName: 'ping',
+    callback: (args) => 'pong',
+  ),
+)
+```
+
+Limites propres au navigateur :
+
+- `evaluateJavascript`, l'injection de JS/CSS, `initialUserScripts` et `window.webview_plus.callHandler` ne fonctionnent que pour une page **same-origin** (assets Flutter, `initialData`, même serveur). Une page d'un autre domaine s'affiche mais reste opaque.
+- Un site qui interdit l'iframe (`X-Frame-Options`, `frame-ancestors`) ne peut pas s'afficher.
+- `initialFile` n'accède pas au disque : fournir une URL, un chemin relatif servi par le même serveur, ou mieux `initialAsset`.
+- `onNavigationRequest` est informatif (une navigation ne peut pas être bloquée a priori) ; `onReceivedError` n'est pas déclenché (une iframe n'expose pas ses erreurs réseau).
+- Pour recouvrir la Webview avec un widget Flutter cliquable, entourer ce widget d'un `PointerInterceptor` (package `pointer_interceptor`).
+
+
+## Démarrage rapide et couleur de fond
+
+```dart
+// 1. Une couleur de départ identique à celle de la page : pas de flash.
+WebviewWidget(
+  initialSettings: WebviewSettings(
+    initialBackgroundColor: const Color(0xFF121212), // = fond du document
+    coverUntilFirstPaint: true,                      // rideau jusqu'au 1er rendu
+    safeBrowsingEnabled: false,                      // contenu local
+  ),
+  initialCss: 'html, body { background: #121212; }',
+  onPageCommitVisible: (c, url) => hideMySpinner(),
+  onProgressChanged: (c, progress) => setState(() => _p = progress),
+  onLoadError: (c, url, code, message) => log('$code $message'),
+);
+
+// 2. Android : précharger la page à l'avance (mêmes paramètres que le widget !).
+await WebviewPlusPreloader.preloadDocument(
+  initialFile: documentViewPath,
+  initialSettings: settings,
+  initialCss: css,
+);
+```
+
+`onLoadResource` (images par défaut, `WebviewSettings.interceptedResourceExtensions`) :
+Android lit les `file://` ; macOS et Linux passent par le schéma `app-assets://`
+(remplacer `file://` par `app-assets://` dans les URLs de médias).
+
+
+## Linux : mode intégré
+
+Pour des Webviews fluides sous Linux, remplacer le `linux/runner/my_application.cc`
+de l'application par celui fourni : la vue Flutter y est placée dans un
+`GtkOverlay`, au-dessus d'un `GtkFixed` qui accueille les Webviews (vrais widgets
+GTK). Le widget `WebviewWidget` perce un trou transparent à son emplacement.
+
+- Aucun changement de code Dart.
+- Ne pas entourer la Webview de widgets qui peignent dans un calque séparé
+  (`Opacity`, `ShaderMask`, `BackdropFilter`) : le trou ne traverserait pas.
+- Variable `WEBVIEW_PLUS_LINUX_MODE=texture` : force l'ancien mode texture.
+- Si WebKit affiche un écran noir avec certains pilotes GPU :
+  `WEBKIT_DISABLE_DMABUF_RENDERER=1` (ou `WEBKIT_DISABLE_COMPOSITING_MODE=1`).

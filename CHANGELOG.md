@@ -1,15 +1,47 @@
+## 0.9.0
+
+### Linux : nouveau mode « intégré » (remplace la texture par défaut)
+- Cause du `glGetError 501` et des plantages aléatoires : `FlPixelBufferTexture` fait un `glBindTexture` sur une texture créée dans un autre contexte GL (défaut du moteur Flutter récent, non corrigeable depuis un plugin). En plus, chaque frame passait par capture X11 -> copie -> envoi complet au GPU, d'où la lenteur.
+- Mode intégré : le `WebKitWebView` est un vrai widget GTK placé SOUS la vue Flutter (fond transparent) ; le widget Dart perce un trou (`BlendMode.clear`) et signale son rectangle (`setRect`). WebKit se dessine nativement (fluide, GPU), fonctionne sous Wayland, et les widgets Flutter (dialogs, barres, spinner, rideau de couleur) restent au-dessus.
+- Nécessite le `my_application.cc` fourni (FlView dans un `GtkOverlay` au-dessus d'un `GtkFixed`). Sans lui : repli automatique sur le mode texture. Forçage du repli : `WEBVIEW_PLUS_LINUX_MODE=texture`.
+
+### Nouveaux callbacks (`WebviewWidget`)
+- `onLoadError(controller, Uri url, int code, String message)` : échec de chargement du document principal (aussi statut HTTP >= 400 sur Android/macOS). `onReceivedError` continue de fonctionner (même événement).
+- `onContentLoading` : navigation validée, le document commence à recevoir son contenu (Android `doUpdateVisitedHistory`, macOS `didCommit`, Linux `COMMITTED`, Web).
+- `onPageCommitVisible` : premier contenu prêt à être peint (Android natif ; macOS/Linux/Web : deux `requestAnimationFrame` après le démarrage du document).
+- `onProgressChanged(controller, int 0..100)` : Android `WebChromeClient`, macOS `estimatedProgress`, Linux `estimated-load-progress`, Web synthétique (10 -> 100).
+- `onLoadResource` fonctionne maintenant pour de bon : côté macOS le natif n'envoyait JAMAIS rien à Dart (simple commentaire dans le code). Implémenté sur Android (`shouldInterceptRequest`, `file://`), macOS et Linux (schéma `app-assets://`). Seules les extensions de `WebviewSettings.interceptedResourceExtensions` (images par défaut) sont transmises, et seulement si le callback est fourni. Windows : contrat Dart identique, natif à implémenter ; Web : impossible avec une iframe.
+
+### Couleur de départ (fini le flash blanc / noir)
+- Android n'appliquait pas `initialBackgroundColor` : la Webview restait blanche jusqu'au premier rendu. Appliqué (`setBackgroundColor`), ainsi que macOS `underPageBackgroundColor`.
+- Nouveau `WebviewSettings.coverUntilFirstPaint` (vrai par défaut) : un rideau Flutter de la couleur `initialBackgroundColor` recouvre la vue native jusqu'au premier rendu, puis fond en 150 ms.
+
+### macOS
+- Nouveau `WebviewSettings.disableRightClickSelection` : le clic droit (et Ctrl+clic) ne sélectionne plus le mot sous le curseur.
+
+### Démarrage Android
+- Les événements natifs sont mis en file d'attente jusqu'à ce que Dart soit prêt (`ready`, envoyé après `onWebViewCreated`) : plus de `onLoadStart`/`onDOMContentLoaded` perdus ni d'appel `callHandler` avant `addJavaScriptHandler`.
+- Le pont `window.webview_plus` est injecté au démarrage du document (`addDocumentStartJavaScript`) au lieu d'un `evaluateJavascript` tardif.
+- `WebviewPlusPreloader.preloadDocument` : charge la page à l'avance dans une Webview détachée, adoptée instantanément par un `WebviewWidget` de mêmes paramètres (événements rejoués), rechargée automatiquement ensuite.
+- Les Webviews du pool utilisent un `MutableContextWrapper` rebranché sur l'Activité (thème de sélection, dialogues, IME).
+
+### Correctif important
+- `WebviewBaseController` utilisait un champ `static` partagé : avec plusieurs Webviews vivantes, les callbacks d'une ancienne vue recevaient le contrôleur de la DERNIÈRE vue créée. Un contrôleur par vue désormais.
+
 ## 0.8.8
 
-- **Linux:** Fixed a pixel buffer use-after-free issue (Flutter raster thread vs. resizing) that could crash the app when launching a WebView page.
-- **Linux:** X11 errors during capture (BadMatch/BadWindow) are now caught instead of crashing the process.
-- **Linux:** Eliminated dangling pointers after `dispose` (`callHandler` callbacks, WebKit signals, channel handler).
-- **Linux:** Implemented on-demand capture (`draw` signal) instead of a constant 60 fps -> ~0 CPU usage when idle, smoother rendering.
-- **Linux:** Added support for `allowFileAccessFromFileURLs`, `allowUniversalAccessFromFileURLs`, `mediaPlaybackRequiresUserGesture`, `domStorageEnabled`, and `initialBackgroundColor`; console logs are now sent to stdout if `isInspectable` is enabled.
-- **Linux:** Set `WEBKIT_DISABLE_DMABUF_RENDERER=1` and `WEBKIT_DISABLE_COMPOSITING_MODE=1` by default (without overwriting existing environment variables).
-- **Linux:** Fixed an `FlMethodResponse` memory leak per call; CMake now creates `PkgConfig::GTK` if missing.
-- **Dart:** The native view is now properly destroyed if the widget is unmounted during `create`.
-- **Dependencies update:** Upgraded the `web` package from version `1.1.1` to `1.1.2` in `pubspec.yaml`.
-- **SDK update:** Upgraded the Flutter / Dart SDK from version `3.12.2` to `3.13.7` in `pubspec.yaml`.
+- Linux : correction d'un use-after-free du buffer de pixels (thread raster Flutter vs redimensionnement) pouvant faire planter l'app au lancement d'une page WebView.
+- Linux : les erreurs X11 pendant la capture (BadMatch/BadWindow) sont piégées au lieu de tuer le processus.
+- Linux : plus de pointeurs pendants après `dispose` (callbacks `callHandler`, signaux WebKit, handler de canal).
+- Linux : capture à la demande (signal `draw`) au lieu de 60 fps permanents -> CPU ~0 à l'arrêt, rendu plus fluide.
+- Linux : prise en charge de `allowFileAccessFromFileURLs`, `allowUniversalAccessFromFileURLs`, `mediaPlaybackRequiresUserGesture`, `domStorageEnabled`, `initialBackgroundColor`; logs console en stdout si `isInspectable`.
+- Linux : `WEBKIT_DISABLE_DMABUF_RENDERER=1` et `WEBKIT_DISABLE_COMPOSITING_MODE=1` par défaut (sans écraser l'environnement existant).
+- Linux : fuite d'un `FlMethodResponse` par appel corrigée ; CMake crée `PkgConfig::GTK` si absent.
+- Dart : si le widget est démonté pendant `create`, la vue native est maintenant détruite.
+- Web : réécriture de l'implémentation iframe. `initialFile`, `initialCss`, `initialSettings` (user scripts, couleurs de sélection, menu contextuel, fond), `onLoadStart`, `onLoadStop`, `onDOMContentLoaded` et `onFontsIsLoaded` sont désormais pris en charge.
+- Web : le pont `window.webview_plus.callHandler` / `WebviewPlusChannel` est injecté au DÉMARRAGE du document (pages same-origin), plus seulement au `load`.
+- Web : les URLs d'assets Flutter sont résolues via `ui_web.assetManager` (l'ancienne résolution donnait un 404 pour `assets/xxx`, servi en réalité sous `assets/assets/xxx`).
+- Web : les messages sont filtrés par iframe (plusieurs Webviews ne se reçoivent plus mutuellement), l'écouteur `message` est libéré au dispose, `onWebViewCreated` est appelé avant le premier chargement.
 
 ## 0.8.7
 

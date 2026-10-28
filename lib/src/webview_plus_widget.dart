@@ -9,6 +9,8 @@ import 'package:webview_plus/src/webview_plus_desktop_scrollbar_theme.dart';
 import 'webview_plus_context_menu.dart';
 import 'webview_plus_controller.dart';
 import 'webview_plus_initial_data.dart';
+import 'webview_plus_linux_embedded.dart';
+import 'webview_plus_preloader.dart';
 import 'webview_plus_settings.dart';
 import 'webview_plus_web.dart' if (dart.library.io) 'webview_plus_web_stub.dart' as web_impl;
 
@@ -42,6 +44,10 @@ class WebviewWidget extends StatefulWidget {
     this.onWindowBlur,
     this.onFontsIsLoaded,
     this.onLoadResource,
+    this.onLoadError,
+    this.onContentLoading,
+    this.onPageCommitVisible,
+    this.onProgressChanged,
     this.filterQuality = FilterQuality.none,
     this.contextMenuItems = const <ContextMenuItem>[],
   }) : assert(
@@ -79,8 +85,32 @@ class WebviewWidget extends StatefulWidget {
   final WebviewLoadCallback? onLoadStart;
   final WebviewLoadCallback? onLoadStop;
   final WebviewLoadCallback? onDOMContentLoaded;
+  /// Historique : identique à [onLoadError] mais avec l'URL en `String`.
   final WebviewErrorCallback? onReceivedError;
+
+  /// Intercepte les ressources locales (images par défaut, voir
+  /// [WebviewSettings.interceptedResourceExtensions]) et permet de les
+  /// remplacer. Android, macOS et Linux (voir [WebviewLoadResourceCallback]).
   final WebviewLoadResourceCallback? onLoadResource;
+
+  /// Le chargement du document principal a échoué (réseau, fichier
+  /// introuvable, statut HTTP >= 400 sur Android/macOS...).
+  final WebviewLoadErrorCallback? onLoadError;
+
+  /// La navigation est validée : le nouveau document commence à recevoir
+  /// son contenu, avant `onDOMContentLoaded` (WebView2 `ContentLoading`,
+  /// WKWebView `didCommit`, WebKitGTK `COMMITTED`, Android
+  /// `doUpdateVisitedHistory`).
+  final WebviewLoadCallback? onContentLoading;
+
+  /// Le premier contenu de la nouvelle page est sur le point d'être peint :
+  /// c'est le bon moment pour retirer un écran de chargement (Android
+  /// `onPageCommitVisible` ; macOS/Linux/Web : deux `requestAnimationFrame`
+  /// après le démarrage du document).
+  final WebviewLoadCallback? onPageCommitVisible;
+
+  /// Progression du chargement, de 0 à 100.
+  final WebviewProgressCallback? onProgressChanged;
 
   final WebviewControllerCallback? onWindowFocus;
   final WebviewControllerCallback? onWindowBlur;
@@ -153,6 +183,10 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
 
   int? _linuxViewId;
   int? _linuxTextureId;
+
+  /// Mode intégré (Webview GTK native sous la vue Flutter, voir
+  /// `LinuxEmbeddedHole`) : pas de texture.
+  bool _linuxEmbedded = false;
   bool _linuxInitScheduled = false;
   bool _linuxReady = false;
 
@@ -185,6 +219,92 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
   // par un `setState`.
   Widget? _webViewWidget;
 
+  // -- Rideau de couleur de fond (voir WebviewSettings.coverUntilFirstPaint) --
+  bool _contentShown = false;
+  bool _curtainGone = false;
+  Timer? _curtainSafetyTimer;
+
+  void _showContent() {
+    if (_contentShown || !mounted) return;
+    setState(() => _contentShown = true);
+  }
+
+  bool get _curtainEnabled {
+    final s = widget.initialSettings;
+    final c = s.initialBackgroundColor;
+    return !kIsWeb &&
+        s.coverUntilFirstPaint &&
+        !s.transparentBackground &&
+        c != null &&
+        c.a > 0;
+  }
+
+  /// Superpose à la vue native un rideau de la couleur de fond attendue,
+  /// retiré en fondu au premier rendu. La structure de l'arbre reste
+  /// IDENTIQUE avant/après (même `Stack`, même premier enfant) : changer
+  /// d'arbre ré-instancierait la vue native.
+  Widget _withCurtain(Widget child, Color background) {
+    if (!_curtainEnabled) return child;
+    return Stack(
+      fit: StackFit.passthrough,
+      children: <Widget>[
+        child,
+        _curtainGone
+            ? const SizedBox.shrink()
+            : Positioned.fill(
+                child: IgnorePointer(
+                  child: AnimatedOpacity(
+                    opacity: _contentShown ? 0.0 : 1.0,
+                    duration: const Duration(milliseconds: 150),
+                    onEnd: () {
+                      if (_contentShown && mounted) {
+                        setState(() => _curtainGone = true);
+                      }
+                    },
+                    child: ColoredBox(color: background),
+                  ),
+                ),
+              ),
+      ],
+    );
+  }
+
+  /// Fabrique le contrôleur d'une vue native. Un SEUL endroit pour câbler
+  /// tous les callbacks (Android/iOS/macOS, Windows, Linux).
+  WebviewBaseController _makeController(
+    int id, {
+    WebviewControllerCallback? onWindowFocus,
+    WebviewControllerCallback? onWindowBlur,
+    WebviewCursorCallback? onCursorChanged,
+    List<ContextMenuItem> contextMenuItems = const <ContextMenuItem>[],
+  }) {
+    return WebviewBaseController.init(
+      id,
+      onNavigationRequest: widget.onNavigationRequest,
+      onMessageReceived: widget.onMessageReceived,
+      onLoadStart: widget.onLoadStart,
+      onLoadStop: (c, uri) {
+        _showContent();
+        widget.onLoadStop?.call(c, uri);
+      },
+      onDOMContentLoaded: widget.onDOMContentLoaded,
+      onReceivedError: widget.onReceivedError,
+      onLoadError: widget.onLoadError,
+      onContentLoading: widget.onContentLoading,
+      onPageCommitVisible: (c, uri) {
+        _showContent();
+        widget.onPageCommitVisible?.call(c, uri);
+      },
+      onProgressChanged: widget.onProgressChanged,
+      onWindowFocus: onWindowFocus,
+      onWindowBlur: onWindowBlur,
+      onCursorChanged: onCursorChanged,
+      onFontsIsLoaded: widget.onFontsIsLoaded,
+      onLoadResource: widget.onLoadResource,
+      contextMenuItems: contextMenuItems,
+    );
+  }
+
   @override
   void initState() {
     super.initState();
@@ -192,6 +312,12 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
       return true;
     }());
     WidgetsBinding.instance.addObserver(this);
+    // Filet de sécurité : si aucun événement de premier rendu n'arrive
+    // (page très lente, plateforme sans onPageCommitVisible), le rideau
+    // est retiré au bout de 4 s pour ne jamais masquer la page.
+    if (_curtainEnabled) {
+      _curtainSafetyTimer = Timer(const Duration(seconds: 4), _showContent);
+    }
     // Important : on ne lance PAS _initLinuxWebview() ici. Comme pour
     // Windows, cette méthode appelle _resolveWindowsScrollbarTheme(), qui
     // peut faire Theme.of(context) en mode `auto`. Tant que initState() n'a
@@ -374,6 +500,7 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
         'initialData': widget.initialData?.toMap(),
         'initialCss': widget.initialCss,
         'initialSettings': widget.initialSettings.toMap(),
+        'hasLoadResourceCallback': widget.onLoadResource != null,
         'userDataFolder': widget.webViewEnvironment?.settings?.userDataFolder,
         'scrollbarTheme': _resolveDesktopScrollbarTheme(),
       });
@@ -382,18 +509,10 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
           Map<dynamic, dynamic>.from(result as Map);
       final textureId = response['textureId'] as int?;
 
-      final controller = WebviewBaseController.init(
+      final controller = _makeController(
         id,
-        onNavigationRequest: widget.onNavigationRequest,
-        onMessageReceived: widget.onMessageReceived,
-        onLoadStart: widget.onLoadStart,
-        onLoadStop: widget.onLoadStop,
-        onDOMContentLoaded: widget.onDOMContentLoaded,
-        onReceivedError: widget.onReceivedError,
         onWindowFocus: widget.onWindowFocus,
         onWindowBlur: widget.onWindowBlur,
-        onFontsIsLoaded: widget.onFontsIsLoaded,
-        onLoadResource: widget.onLoadResource,
         onCursorChanged: (_, cursorKind) {
           if (!mounted) return;
           setState(() => _windowsCursor = _cursorFromKind(cursorKind));
@@ -434,6 +553,7 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
         'initialData': widget.initialData?.toMap(),
         'initialCss': widget.initialCss,
         'initialSettings': widget.initialSettings.toMap(),
+        'hasLoadResourceCallback': widget.onLoadResource != null,
         // WebKitGTK respecte les mêmes pseudo-éléments `::-webkit-scrollbar*`
         // que Windows/macOS : on réutilise donc la même résolution de thème.
         'scrollbarTheme': _resolveDesktopScrollbarTheme(),
@@ -441,19 +561,10 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
 
       final Map<dynamic, dynamic> response =
           Map<dynamic, dynamic>.from(result as Map);
-      final textureId = response['textureId'] as int?;
+      final bool embedded = response['embedded'] == true;
+      final textureId = embedded ? null : response['textureId'] as int?;
 
-      final controller = WebviewBaseController.init(
-        id,
-        onNavigationRequest: widget.onNavigationRequest,
-        onMessageReceived: widget.onMessageReceived,
-        onLoadStart: widget.onLoadStart,
-        onLoadStop: widget.onLoadStop,
-        onDOMContentLoaded: widget.onDOMContentLoaded,
-        onReceivedError: widget.onReceivedError,
-        onFontsIsLoaded: widget.onFontsIsLoaded,
-        onLoadResource: widget.onLoadResource,
-      );
+      final controller = _makeController(id);
 
       if (!mounted) {
         // Le widget a été démonté pendant la création native : `dispose()`
@@ -465,8 +576,9 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
         return;
       }
       setState(() {
+        _linuxEmbedded = embedded;
         _linuxTextureId = textureId;
-        _linuxReady = textureId != null;
+        _linuxReady = embedded || textureId != null;
       });
       _handleControllerCreated(controller);
       // Le widget peut déjà avoir été peint (et donc avoir une taille
@@ -479,9 +591,23 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
     }
   }
 
+  /// Mode intégré : position/taille de la Webview GTK (pixels logiques,
+  /// relatifs à la vue Flutter), fournies par `LinuxEmbeddedHole`.
+  void _reportLinuxEmbeddedRect(Rect rect) {
+    final viewId = _linuxViewId;
+    if (viewId == null || !_linuxReady || !_linuxEmbedded) return;
+    _globalLinuxChannel.invokeMethod('setRect', {
+      'viewId': viewId,
+      'x': rect.left,
+      'y': rect.top,
+      'width': rect.width,
+      'height': rect.height,
+    });
+  }
+
   void _reportLinuxSurfaceSize() {
     final viewId = _linuxViewId;
-    if (viewId == null || !_linuxReady) return;
+    if (viewId == null || !_linuxReady || _linuxEmbedded) return;
 
     final RenderBox? renderBox =
         _linuxWidgetKey.currentContext?.findRenderObject() as RenderBox?;
@@ -779,7 +905,7 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
   }
 
   Widget _buildLinuxWebview() {
-    if (!_linuxReady || _linuxTextureId == null) {
+    if (!_linuxReady || (_linuxTextureId == null && !_linuxEmbedded)) {
       return const SizedBox.expand();
     }
 
@@ -795,6 +921,7 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
           focusNode: _linuxFocusNode,
           onKeyEvent: _handleLinuxKeyEvent,
           child: Listener(
+            behavior: HitTestBehavior.opaque,
             onPointerHover: (event) {
               _globalLinuxChannel.invokeMethod('setCursorPos', {
                 'viewId': _linuxViewId,
@@ -876,10 +1003,12 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
                 });
               }
             },
-            child: Texture(
-              textureId: _linuxTextureId!,
-              filterQuality: widget.filterQuality,
-            ),
+            child: _linuxEmbedded
+                ? LinuxEmbeddedHole(onRectChanged: _reportLinuxEmbeddedRect)
+                : Texture(
+                    textureId: _linuxTextureId!,
+                    filterQuality: widget.filterQuality,
+                  ),
           ),
         ),
       ),
@@ -901,11 +1030,28 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
       _webViewWidget ??= web_impl.buildWebview(
         initialUrl: widget.initialUrl,
         initialAsset: widget.initialAsset,
+        initialFile: widget.initialFile,
         initialData: widget.initialData,
+        initialCss: widget.initialCss,
+        initialSettings: widget.initialSettings,
         onMessageReceived: (controller, message) =>
             widget.onMessageReceived?.call(controller, message),
         onNavigationRequest: (controller, uri) =>
             widget.onNavigationRequest?.call(controller, uri) ?? true,
+        onLoadStart: (controller, uri) =>
+            widget.onLoadStart?.call(controller, uri),
+        onLoadStop: (controller, uri) =>
+            widget.onLoadStop?.call(controller, uri),
+        onDOMContentLoaded: (controller, uri) =>
+            widget.onDOMContentLoaded?.call(controller, uri),
+        onFontsIsLoaded: (controller, families) =>
+            widget.onFontsIsLoaded?.call(controller, families),
+        onContentLoading: (controller, uri) =>
+            widget.onContentLoading?.call(controller, uri),
+        onPageCommitVisible: (controller, uri) =>
+            widget.onPageCommitVisible?.call(controller, uri),
+        onProgressChanged: (controller, progress) =>
+            widget.onProgressChanged?.call(controller, progress),
         onControllerCreated: _handleControllerCreated,
       );
       return Container(
@@ -926,6 +1072,18 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
       'initialCss': widget.initialCss,
       'initialSettings': widget.initialSettings.toMap(),
       'scrollbarTheme': _resolveDesktopScrollbarTheme(),
+      'hasLoadResourceCallback': widget.onLoadResource != null,
+      if (defaultTargetPlatform == TargetPlatform.android)
+        'preloadKey': WebviewPlusPreloader.preloadKeyFor(
+        initialUrl: widget.initialUrl,
+        initialAsset: widget.initialAsset,
+        initialFile: widget.initialFile,
+        initialData: widget.initialData,
+        initialCss: widget.initialCss,
+        initialSettings: widget.initialSettings,
+        contextMenuItems: supportsContextMenuItems ? widget.contextMenuItems : const <ContextMenuItem>[],
+        hasLoadResourceCallback: widget.onLoadResource != null,
+      ),
       if (supportsContextMenuItems) 'contextMenuItems': widget.contextMenuItems.map((e) => e.toMap()).toList(),
     };
 
@@ -1071,22 +1229,14 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
     // On encapsule la vue finale de la plateforme choisie dans un Container coloré
     return Container(
       color: backgroundColor,
-      child: platformWidget,
+      child: _withCurtain(platformWidget, backgroundColor),
     );
   }
 
   void _onPlatformViewCreated(int id) {
     final bool supportsContextMenuItems = !kIsWeb && (defaultTargetPlatform == TargetPlatform.android || defaultTargetPlatform == TargetPlatform.iOS);
-    final controller = WebviewBaseController.init(
+    final controller = _makeController(
       id,
-      onNavigationRequest: widget.onNavigationRequest,
-      onMessageReceived: widget.onMessageReceived,
-      onLoadStart: widget.onLoadStart,
-      onLoadStop: widget.onLoadStop,
-      onDOMContentLoaded: widget.onDOMContentLoaded,
-      onReceivedError: widget.onReceivedError,
-      onFontsIsLoaded: widget.onFontsIsLoaded,
-      onLoadResource: widget.onLoadResource,
       contextMenuItems: supportsContextMenuItems ? widget.contextMenuItems : const [],
     );
     _handleControllerCreated(controller);
@@ -1100,6 +1250,12 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
     // [WebviewCreatedCallback] : pas de filtrage par type ici, sous peine de
     // ne jamais notifier l'hôte côté Web.
     widget.onWebViewCreated?.call(controller);
+    // Dart est prêt (handlers JS enregistrés par `onWebViewCreated`) : la
+    // vue native peut maintenant livrer les événements mis en file
+    // d'attente (voir `WebviewBaseController.markReady`).
+    if (controller is WebviewBaseController) {
+      unawaited(controller.markReady());
+    }
   }
 
   @override
@@ -1112,6 +1268,7 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
       _globalLinuxChannel.invokeMethod('dispose', {'viewId': _linuxViewId});
     }
     _linuxFocusNode.dispose();
+    _curtainSafetyTimer?.cancel();
     super.dispose();
   }
 }

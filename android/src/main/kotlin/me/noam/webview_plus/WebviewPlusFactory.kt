@@ -21,6 +21,19 @@ class WebviewPlusFactory(
         // visible de l'app. Aucune incidence fonctionnelle si le pool est
         // vide : on retombe simplement sur la construction normale, faite
         // à l'intérieur de WebviewPlusPlatformView.
+        //
+        // D'abord : une page DÉJÀ CHARGÉE (WebviewPlusPreloader.preloadDocument)
+        // dont l'empreinte de paramètres correspond exactement à celle de ce
+        // widget. Elle est rattachée au canal de la vue et ses événements
+        // sont rejoués dès que Dart signale `ready`.
+        val preloadKey = creationParams?.get("preloadKey") as? String
+        if (preloadKey != null) {
+            val preloaded = WebviewPlusPreloader.acquirePreloaded(preloadKey)
+            if (preloaded != null) {
+                preloaded.attach(messenger, viewId, resolvedContext)
+                return preloaded
+            }
+        }
         val preWarmedWebView = WebviewPlusPreloader.acquireWarmedEngine()
         return WebviewPlusPlatformView(
             resolvedContext,

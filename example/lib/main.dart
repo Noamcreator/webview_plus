@@ -106,6 +106,7 @@ class _WebviewDemoPageState extends State<WebviewDemoPage>
   final Set<DefaultContextMenuItem> _disabledDefaultItems = <DefaultContextMenuItem>{};
   bool _disableLinkHoverPreview = true;
   bool _disablePrinting = false;
+  bool _disableRightClickSelection = false;
 
   // -- Android ---------------------------------------------------------------
   bool _allowFileAccess = true;
@@ -220,6 +221,7 @@ class _WebviewDemoPageState extends State<WebviewDemoPage>
         disabledDefaultContextMenuItems: _disabledDefaultItems,
         disableLinkHoverPreview: _disableLinkHoverPreview,
         disablePrinting: _disablePrinting,
+        disableRightClickSelection: _disableRightClickSelection,
 
         // Android
         allowFileAccess: _allowFileAccess,
@@ -688,12 +690,21 @@ class _WebviewDemoPageState extends State<WebviewDemoPage>
                   // L'application attendra que cette ligne soit atteinte avant de continuer côté Swift !
                   return null;
                 },
-                onReceivedError: (controller, url, code, description) {
+                onLoadError: (controller, url, code, message) {
                   setState(() {
                     _isLoading = false;
                     _status = 'Erreur ($code)';
                   });
-                  _pushLog('Erreur ($code) sur $url : $description');
+                  _pushLog('onLoadError ($code) sur $url : $message');
+                },
+                onContentLoading: (controller, url) =>
+                    _pushLog('onContentLoading $url'),
+                onPageCommitVisible: (controller, url) =>
+                    _pushLog('onPageCommitVisible $url'),
+                onProgressChanged: (controller, progress) {
+                  if (progress < 100) {
+                    setState(() => _status = 'Chargement $progress %');
+                  }
                 },
                 onWindowFocus: (controller) => setState(() => _status = 'Focus'),
                 onWindowBlur: (controller) => setState(() => _status = 'Perte de focus'),
@@ -1030,6 +1041,11 @@ class _WebviewDemoPageState extends State<WebviewDemoPage>
               title: const Text('Désactiver l\'impression (Ctrl/Cmd+P)'),
               value: _disablePrinting,
               onChanged: (v) => setState(() => _disablePrinting = v),
+            ),
+            SwitchListTile(
+              title: const Text('Clic droit sans sélection (macOS)'),
+              value: _disableRightClickSelection,
+              onChanged: (v) => setState(() => _disableRightClickSelection = v),
             ),
             _colorTile(
               'Couleur du texte sélectionné',

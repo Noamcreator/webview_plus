@@ -99,6 +99,9 @@ class WebviewSettings {
     this.disabledDefaultContextMenuItems = const <DefaultContextMenuItem>{},
     this.disableLinkHoverPreview = true,
     this.disablePrinting = false,
+    this.disableRightClickSelection = false,
+    this.interceptedResourceExtensions = defaultInterceptedResourceExtensions,
+    this.coverUntilFirstPaint = true,
     this.initialUserScripts = const <UserScript>[],
     this.disableKeyboardResize = false,
     this.windowsScrollbarTheme = const DesktopScrollbarTheme(),
@@ -154,9 +157,25 @@ class WebviewSettings {
   /// contenu Flutter derrière/au-dessus de la page).
   final bool transparentBackground;
 
-  /// Couleur d'arrière-plan par défaut du widget pendant son chargement
-  /// ou si l'arrière-plan de la Webview est transparent.
+  /// Couleur d'arrière-plan peinte **dès le premier frame** : par la vue
+  /// native elle-même (Android `setBackgroundColor`, macOS `layer` +
+  /// `underPageBackgroundColor`, Linux `webkit_web_view_set_background_color`)
+  /// ET, si [coverUntilFirstPaint] est vrai, par un rideau Flutter de même
+  /// couleur placé au-dessus de la vue native jusqu'au premier rendu de la
+  /// page. Aucun flash blanc/noir entre l'ouverture de l'écran et
+  /// l'affichage du document.
+  ///
+  /// Pour une page à thème (clair/sombre) propre, passer exactement la
+  /// couleur de fond que la PAGE aura ensuite (pas celle du thème Flutter,
+  /// qui peut différer du thème du document).
   final Color? initialBackgroundColor;
+
+  /// Recouvre la vue native avec [initialBackgroundColor] tant que la page
+  /// n'a pas peint son premier contenu (`onPageCommitVisible`, à défaut
+  /// `onDOMContentLoaded`/`onLoadStop`), puis fond le rideau en ~150 ms.
+  /// Sans effet si [initialBackgroundColor] est `null`/transparent ou si
+  /// [transparentBackground] est vrai. Vrai par défaut.
+  final bool coverUntilFirstPaint;
 
   /// User-Agent personnalisé. `null` = valeur par défaut de la plateforme.
   final String? userAgent;
@@ -234,6 +253,26 @@ class WebviewSettings {
   /// lorsque la plateforme le permet, via `window.print()`). Faux par
   /// défaut (impression autorisée).
   final bool disablePrinting;
+
+  /// **macOS.** Empêche le clic droit (et Ctrl+clic) de sélectionner le mot
+  /// sous le curseur. Par défaut WebKit sélectionne ce mot avant d'ouvrir
+  /// le menu contextuel ; [disableContextMenu] masque le menu mais PAS
+  /// cette sélection. Avec `true`, les événements de clic droit ne sont
+  /// plus transmis à la page (ni `mousedown` bouton 2, ni `contextmenu`).
+  /// Faux par défaut. Sans effet sur les autres plateformes.
+  final bool disableRightClickSelection;
+
+  /// Extensions de fichiers (sans point, minuscules) dont les requêtes sont
+  /// transmises à [WebviewWidget.onLoadResource] **si ce callback est
+  /// fourni**. Le reste (HTML/JS/CSS/polices) n'est jamais intercepté, pour
+  /// ne pas encoder en Base64 un script de plusieurs centaines de Ko à
+  /// chaque démarrage. Par défaut : images ([defaultInterceptedResourceExtensions]).
+  final List<String> interceptedResourceExtensions;
+
+  /// Extensions interceptées par défaut par `onLoadResource` (images).
+  static const List<String> defaultInterceptedResourceExtensions = <String>[
+    'jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp', 'ico',
+  ];
 
   /// Scripts JavaScript injectés automatiquement dans chaque page chargée
   /// (voir [UserScript]). **Android, iOS, macOS.**
@@ -410,6 +449,9 @@ class WebviewSettings {
         'disabledDefaultContextMenuItems': disabledDefaultContextMenuItems.map((e) => e.name).toList(),
         'disableLinkHoverPreview': disableLinkHoverPreview,
         'disablePrinting': disablePrinting,
+        'disableRightClickSelection': disableRightClickSelection,
+        'interceptedResourceExtensions': interceptedResourceExtensions,
+        'coverUntilFirstPaint': coverUntilFirstPaint,
         'initialUserScripts': initialUserScripts.map((e) => e.toMap()).toList(),
         'disableKeyboardResize': disableKeyboardResize,
         'windowsScrollbarTheme': windowsScrollbarTheme.toMap(),

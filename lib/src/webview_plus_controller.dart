@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter/services.dart';
 
 import 'webview_plus_context_menu.dart';
@@ -112,6 +113,24 @@ typedef WebviewErrorCallback = void Function(
   String description,
 );
 
+/// Callback appelé lorsque le chargement du document principal échoue
+/// (hors annulation volontaire). [url] est l'adresse qui a échoué, [code]
+/// le code d'erreur natif de la plateforme (ou le statut HTTP >= 400 sur
+/// Android/macOS) et [message] sa description lisible.
+typedef WebviewLoadErrorCallback = void Function(
+  WebviewPlusController controller,
+  Uri url,
+  int code,
+  String message,
+);
+
+/// Progression du chargement, de 0 à 100 (voir
+/// [WebviewWidget.onProgressChanged]).
+typedef WebviewProgressCallback = void Function(
+  WebviewPlusController controller,
+  int progress,
+);
+
 /// Callback appelé lorsque le JavaScript de la page invoque
 /// `window.webview_plus.callHandler(handlerName, ...args)`.
 typedef JavaScriptHandlerCallback = FutureOr<dynamic> Function(
@@ -140,8 +159,17 @@ typedef WebviewFontsLoadedCallback = void Function(
   List<String> loadedFontFamilies,
 );
 
-/// Callback appelé lorsqu'une ressource (image, etc.) se charge.
-/// Contient l'URL de la ressource et les données en base64 (si décodées côté natif).
+/// Callback appelé pour chaque ressource locale chargée par la page dont
+/// l'extension figure dans [WebviewSettings.interceptedResourceExtensions]
+/// (images par défaut). [data] contient les octets de la ressource ; la
+/// valeur de retour est soit `null` (ressource servie telle quelle), soit
+/// les octets de remplacement **encodés en Base64**.
+///
+/// Fonctionne de façon identique sur Android (`file://`), macOS et Linux
+/// (schéma `app-assets://`, voir `normalizeMediaUri`). Windows : même
+/// contrat côté Dart (le natif Windows doit l'implémenter). Web : une
+/// iframe ne permet pas d'intercepter les ressources, le callback n'est
+/// jamais appelé.
 typedef WebviewLoadResourceCallback = Future<String?> Function(
   WebviewPlusController controller,
   String url,
@@ -157,8 +185,6 @@ typedef WebviewLoadResourceCallback = Future<String?> Function(
 /// UiKitView) au moment de sa création.
 class WebviewBaseController implements WebviewPlusController {
   WebviewBaseController._(this._channel);
-
-  static late WebviewBaseController _controller;
 
   static const MethodChannel _infoChannel = MethodChannel('plugins.noam.me/webview_plus_info');
 
@@ -206,6 +232,10 @@ class WebviewBaseController implements WebviewPlusController {
   WebviewCursorCallback? _onCursorChanged;
   WebviewFontsLoadedCallback? _onFontsIsLoaded;
   WebviewLoadResourceCallback? _onLoadResource;
+  WebviewLoadErrorCallback? _onLoadError;
+  WebviewLoadCallback? _onContentLoading;
+  WebviewLoadCallback? _onPageCommitVisible;
+  WebviewProgressCallback? _onProgressChanged;
 
   final Map<String, JavaScriptHandlerCallback> _javaScriptHandlers =
       <String, JavaScriptHandlerCallback>{};
@@ -228,10 +258,19 @@ class WebviewBaseController implements WebviewPlusController {
     WebviewCursorCallback? onCursorChanged,
     WebviewFontsLoadedCallback? onFontsIsLoaded,
     WebviewLoadResourceCallback? onLoadResource,
+    WebviewLoadErrorCallback? onLoadError,
+    WebviewLoadCallback? onContentLoading,
+    WebviewLoadCallback? onPageCommitVisible,
+    WebviewProgressCallback? onProgressChanged,
     List<ContextMenuItem> contextMenuItems = const <ContextMenuItem>[],
   }) {
     final channel = MethodChannel('webview_plus_$viewId');
-    _controller = WebviewBaseController._(channel)
+    // Une instance PAR vue : les callbacks natifs de chaque Webview doivent
+    // recevoir *leur* contrôleur (avant, un champ `static` partagé faisait
+    // que toutes les vues vivantes recevaient le contrôleur de la dernière
+    // créée, ex. `controller.evaluateJavascript` dans `onDOMContentLoaded`
+    // d'une ancienne page partait vers la mauvaise Webview).
+    final controller = WebviewBaseController._(channel)
       .._onNavigationRequest = onNavigationRequest
       .._onMessageReceived = onMessageReceived
       .._onLoadStart = onLoadStart
@@ -242,10 +281,32 @@ class WebviewBaseController implements WebviewPlusController {
       .._onWindowBlur = onWindowBlur
       .._onCursorChanged = onCursorChanged
       .._onFontsIsLoaded = onFontsIsLoaded
-      .._onLoadResource = onLoadResource;
-    _controller._registerContextMenuActionsLocally(contextMenuItems);
-    channel.setMethodCallHandler(_controller._onMethodCall);
-    return _controller;
+      .._onLoadResource = onLoadResource
+      .._onLoadError = onLoadError
+      .._onContentLoading = onContentLoading
+      .._onPageCommitVisible = onPageCommitVisible
+      .._onProgressChanged = onProgressChanged;
+    controller._registerContextMenuActionsLocally(contextMenuItems);
+    channel.setMethodCallHandler(controller._onMethodCall);
+    return controller;
+  }
+
+  /// Signale à la vue native que Dart est prêt à recevoir ses événements
+  /// (`onLoadStart`, `onDOMContentLoaded`, appels `callHandler`...).
+  ///
+  /// Android met ces événements en file d'attente jusqu'à cet appel : sans
+  /// cela, une page qui charge plus vite que la création du contrôleur
+  /// (cas d'une page locale ou d'une Webview pré-chargée) perdrait des
+  /// événements, ou appellerait `callHandler` avant que
+  /// `addJavaScriptHandler` n'ait été exécuté. Appelé par le widget après
+  /// `onWebViewCreated`. Sans effet (ignoré) sur les plateformes qui ne le
+  /// gèrent pas.
+  Future<void> markReady() async {
+    try {
+      await _channel.invokeMethod<void>('ready');
+    } on MissingPluginException {
+      // Plateforme sans file d'attente d'événements : rien à faire.
+    } catch (_) {}
   }
 
   void _registerContextMenuActionsLocally(List<ContextMenuItem> items) {
@@ -269,52 +330,67 @@ class WebviewBaseController implements WebviewPlusController {
       case 'onNavigationRequest':
         final String url = call.arguments as String;
         if (_onNavigationRequest != null) {
-          final bool allow = await _onNavigationRequest!(_controller, Uri.parse(url));
+          final bool allow = await _onNavigationRequest!(this, Uri.parse(url));
           return allow;
         }
         return true;
 
       case 'onMessageReceived':
         final String message = call.arguments as String;
-        _onMessageReceived?.call(_controller, message);
+        _onMessageReceived?.call(this, message);
         return null;
 
       case 'onLoadStart':
         final String url = call.arguments as String;
-        _onLoadStart?.call(_controller, Uri.parse(url));
+        _onLoadStart?.call(this, Uri.parse(url));
         return null;
 
       case 'onLoadStop':
         final String url = call.arguments as String;
-        _onLoadStop?.call(_controller, Uri.parse(url));
+        _onLoadStop?.call(this, Uri.parse(url));
         return null;
 
       case 'onDOMContentLoaded':
         final String url = call.arguments as String;
-        _onDOMContentLoaded?.call(_controller, Uri.parse(url));
+        _onDOMContentLoaded?.call(this, Uri.parse(url));
         return null;
 
       case 'onReceivedError':
+      case 'onLoadError':
         final map = Map<String, dynamic>.from(call.arguments as Map);
-        _onReceivedError?.call(
-          _controller,
-          map['url'] as String? ?? '',
-          map['code'] as int? ?? -1,
-          map['description'] as String? ?? '',
-        );
+        final String errUrl = map['url'] as String? ?? '';
+        final int errCode = (map['code'] as num?)?.toInt() ?? -1;
+        final String errMessage = map['description'] as String? ?? '';
+        // `onReceivedError` (historique) et `onLoadError` reçoivent le même
+        // événement : une erreur de chargement du document principal.
+        _onReceivedError?.call(this, errUrl, errCode, errMessage);
+        _onLoadError?.call(this, Uri.tryParse(errUrl) ?? Uri(), errCode, errMessage);
+        return null;
+
+      case 'onContentLoading':
+        _onContentLoading?.call(this, Uri.tryParse(call.arguments as String? ?? '') ?? Uri());
+        return null;
+
+      case 'onPageCommitVisible':
+        _onPageCommitVisible?.call(this, Uri.tryParse(call.arguments as String? ?? '') ?? Uri());
+        return null;
+
+      case 'onProgressChanged':
+        final int progress = ((call.arguments as num?)?.toInt() ?? 0).clamp(0, 100);
+        _onProgressChanged?.call(this, progress);
         return null;
 
       case 'onWindowFocus':
-        _onWindowFocus?.call(_controller);
+        _onWindowFocus?.call(this);
         return null;
 
       case 'onWindowBlur':
-        _onWindowBlur?.call(_controller);
+        _onWindowBlur?.call(this);
         return null;
 
       case 'onCursorChanged':
         final String cursorKind = call.arguments as String;
-        _onCursorChanged?.call(_controller, cursorKind);
+        _onCursorChanged?.call(this, cursorKind);
         return null;
 
       case 'onFontsIsLoaded':
@@ -327,25 +403,24 @@ class WebviewBaseController implements WebviewPlusController {
         } catch (_) {
           families = <String>[];
         }
-        _onFontsIsLoaded?.call(_controller, families);
+        _onFontsIsLoaded?.call(this, families);
         return null;
       
       case 'onLoadResource':
-      final map = Map<String, dynamic>.from(call.arguments as Map);
-      final String url = map['url'] as String? ?? '';
-      final String base64Data = map['data'] as String? ?? '';
-      
-      if (_onLoadResource != null && base64Data.isNotEmpty) {
-        // 1. Décode les données reçues de Swift en Uint8List
-        final Uint8List decodedBytes = base64Decode(base64Data);
-        
-        // 2. ICI : On met le "await" pour attendre la réponse de ton application
-        final String? newBase64 = await _onLoadResource!(_controller, url, decodedBytes);
-        
-        // 3. On renvoie ce résultat directement à Swift
-        return newBase64; 
-      }
-      return null;
+        // Contrat identique sur toutes les plateformes : {url, data(base64)}
+        // -> renvoie `null` (ressource inchangée) ou les octets de
+        // remplacement en Base64. Voir [WebviewLoadResourceCallback].
+        final map = Map<String, dynamic>.from(call.arguments as Map);
+        final String resourceUrl = map['url'] as String? ?? '';
+        final String base64Data = map['data'] as String? ?? '';
+        final callback = _onLoadResource;
+        if (callback == null || base64Data.isEmpty) return null;
+        try {
+          return await callback(this, resourceUrl, base64Decode(base64Data));
+        } catch (e) {
+          debugPrint('[webview_plus] onLoadResource a échoué pour $resourceUrl : $e');
+          return null; // en cas d'erreur, la ressource d'origine est servie
+        }
 
       case 'onContextMenuAction':
         final map = Map<String, dynamic>.from(call.arguments as Map);

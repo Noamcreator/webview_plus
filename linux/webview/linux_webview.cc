@@ -149,6 +149,16 @@ static void channel_message_cb(WebKitUserContentManager *manager,
   invoke_method(webview, "onMessageReceived", args);
 }
 
+static void page_commit_visible_message_cb(WebKitUserContentManager *manager,
+                                           WebKitJavascriptResult *js_result,
+                                           gpointer user_data) {
+  LinuxWebview *webview = static_cast<LinuxWebview *>(user_data);
+  JSCValue *value = webkit_javascript_result_get_js_value(js_result);
+  g_autofree gchar *url = jsc_value_to_string(value);
+  g_autoptr(FlValue) args = fl_value_new_string(url != nullptr ? url : "");
+  invoke_method(webview, "onPageCommitVisible", args);
+}
+
 static void dom_content_loaded_message_cb(WebKitUserContentManager *manager,
                                           WebKitJavascriptResult *js_result,
                                           gpointer user_data) {
@@ -258,9 +268,23 @@ static void load_changed_cb(WebKitWebView *widget, WebKitLoadEvent load_event,
   g_autoptr(FlValue) args = fl_value_new_string(uri != nullptr ? uri : "");
   if (load_event == WEBKIT_LOAD_STARTED) {
     invoke_method(webview, "onLoadStart", args);
+  } else if (load_event == WEBKIT_LOAD_COMMITTED) {
+    // Navigation validée : le document commence à recevoir son contenu.
+    invoke_method(webview, "onContentLoading", args);
   } else if (load_event == WEBKIT_LOAD_FINISHED) {
     invoke_method(webview, "onLoadStop", args);
   }
+}
+
+static void progress_changed_cb(GObject *object, GParamSpec *pspec,
+                                gpointer user_data) {
+  (void)pspec;
+  LinuxWebview *webview = static_cast<LinuxWebview *>(user_data);
+  const gdouble progress =
+      webkit_web_view_get_estimated_load_progress(WEBKIT_WEB_VIEW(object));
+  g_autoptr(FlValue) args =
+      fl_value_new_int(static_cast<int64_t>(progress * 100.0 + 0.5));
+  invoke_method(webview, "onProgressChanged", args);
 }
 
 static const gchar *error_description(GError *error) {
@@ -567,6 +591,11 @@ void apply_bridge_script(LinuxWebview *webview, const gchar *selection_css,
       "  } else {"
       "    __fwNotifyDomContentLoaded();"
       "  }"
+      "  try {"
+      "    requestAnimationFrame(function() { requestAnimationFrame(function() {"
+      "      window.webkit.messageHandlers.WebviewPlusPageCommitVisible.postMessage(window.location.href);"
+      "    }); });"
+      "  } catch (e) {}"
       "  var __fwCbId = 0;"
       "  var __fwCallbacks = {};"
       "  window.webview_plus = {"
@@ -663,6 +692,7 @@ void linux_webview_unref(LinuxWebview *webview) {
   if (g_atomic_int_dec_and_test(&webview->ref_count)) {
     g_free(webview->selection_css_color);
     g_free(webview->selection_text_css_color);
+    g_strfreev(webview->intercepted_extensions);
     g_free(webview);
   }
 }
@@ -708,6 +738,169 @@ void destroy_linux_webview(gpointer data) {
   linux_webview_unref(webview);  // référence initiale (table)
 }
 
+// -- Schéma `app-assets://` et `onLoadResource` ---------------------------
+//
+// WebKitGTK ne permet pas d'intercepter les requêtes `file://` ; seuls les
+// schémas personnalisés passent par un gestionnaire. Comme sur macOS, la
+// page référence donc ses médias en `app-assets:///chemin/absolu.png` (voir
+// `normalizeMediaUri` côté application). Le gestionnaire lit le fichier,
+// l'envoie à Dart (Base64) SI `onLoadResource` est fourni et que
+// l'extension est interceptée, puis sert les octets d'origine ou ceux que
+// Dart a renvoyés.
+namespace {
+
+const gchar *mime_for_extension(const gchar *ext) {
+  static const struct {
+    const gchar *ext;
+    const gchar *mime;
+  } kTable[] = {
+      {"jpg", "image/jpeg"},        {"jpeg", "image/jpeg"},
+      {"png", "image/png"},         {"gif", "image/gif"},
+      {"webp", "image/webp"},       {"svg", "image/svg+xml"},
+      {"ico", "image/x-icon"},      {"bmp", "image/bmp"},
+      {"tif", "image/tiff"},        {"tiff", "image/tiff"},
+      {"html", "text/html"},        {"htm", "text/html"},
+      {"css", "text/css"},          {"js", "application/javascript"},
+      {"mjs", "application/javascript"}, {"json", "application/json"},
+      {"xml", "application/xml"},   {"txt", "text/plain"},
+      {"woff", "font/woff"},        {"woff2", "font/woff2"},
+      {"ttf", "font/ttf"},          {"otf", "font/otf"},
+      {"mp4", "video/mp4"},         {"webm", "video/webm"},
+      {"ogv", "video/ogg"},         {"mp3", "audio/mpeg"},
+      {"wav", "audio/wav"},         {"ogg", "audio/ogg"},
+      {"oga", "audio/ogg"},         {"aac", "audio/aac"},
+      {"pdf", "application/pdf"},   {"zip", "application/zip"},
+  };
+  for (const auto &entry : kTable) {
+    if (g_strcmp0(entry.ext, ext) == 0) return entry.mime;
+  }
+  return "application/octet-stream";
+}
+
+// Sert [data] (propriété transférée) à la requête.
+void finish_resource_request(WebKitURISchemeRequest *request, guchar *data,
+                             gsize length, const gchar *mime) {
+  GInputStream *stream = g_memory_input_stream_new_from_data(data, length, g_free);
+  webkit_uri_scheme_request_finish(request, stream, static_cast<gint64>(length), mime);
+  g_object_unref(stream);
+}
+
+struct ResourceReplyContext {
+  WebKitURISchemeRequest *request;  // référence possédée
+  LinuxWebview *webview;            // référence possédée
+  gchar *mime;
+  guchar *original;  // octets d'origine, servis si Dart ne remplace rien
+  gsize original_length;
+};
+
+void resource_reply_cb(GObject *object, GAsyncResult *result, gpointer user_data) {
+  ResourceReplyContext *ctx = static_cast<ResourceReplyContext *>(user_data);
+  g_autoptr(GError) error = nullptr;
+  g_autoptr(FlMethodResponse) response = fl_method_channel_invoke_method_finish(
+      FL_METHOD_CHANNEL(object), result, &error);
+
+  guchar *bytes = nullptr;
+  gsize length = 0;
+  if (response != nullptr && FL_IS_METHOD_SUCCESS_RESPONSE(response)) {
+    FlValue *value =
+        fl_method_success_response_get_result(FL_METHOD_SUCCESS_RESPONSE(response));
+    if (value != nullptr && fl_value_get_type(value) == FL_VALUE_TYPE_STRING) {
+      const gchar *encoded = fl_value_get_string(value);
+      if (encoded != nullptr && encoded[0] != '\0') {
+        bytes = g_base64_decode(encoded, &length);
+      }
+    }
+  }
+  if (bytes == nullptr) {  // pas de remplacement : octets d'origine
+    bytes = ctx->original;
+    length = ctx->original_length;
+    ctx->original = nullptr;
+  }
+  finish_resource_request(ctx->request, bytes, length, ctx->mime);
+
+  g_free(ctx->original);
+  g_free(ctx->mime);
+  g_object_unref(ctx->request);
+  linux_webview_unref(ctx->webview);
+  g_free(ctx);
+}
+
+gboolean extension_is_intercepted(LinuxWebview *webview, const gchar *ext) {
+  if (webview->intercepted_extensions == nullptr) return FALSE;
+  return g_strv_contains(webview->intercepted_extensions, ext);
+}
+
+void app_assets_request_cb(WebKitURISchemeRequest *request, gpointer user_data) {
+  (void)user_data;
+  static const gchar kPrefix[] = "app-assets://";
+  const gchar *uri = webkit_uri_scheme_request_get_uri(request);
+
+  g_autoptr(GError) error = nullptr;
+  g_autofree gchar *path = nullptr;
+  if (uri != nullptr && g_str_has_prefix(uri, kPrefix)) {
+    g_autofree gchar *file_uri = g_strconcat("file://", uri + strlen(kPrefix), nullptr);
+    path = g_filename_from_uri(file_uri, nullptr, &error);
+  }
+
+  gchar *contents = nullptr;
+  gsize length = 0;
+  if (path == nullptr || !g_file_get_contents(path, &contents, &length, &error)) {
+    g_autoptr(GError) fallback = g_error_new_literal(
+        G_IO_ERROR, G_IO_ERROR_NOT_FOUND, "Ressource app-assets introuvable.");
+    webkit_uri_scheme_request_finish_error(request, error != nullptr ? error : fallback);
+    return;
+  }
+
+  const gchar *dot = strrchr(path, '.');
+  g_autofree gchar *ext = g_ascii_strdown(dot != nullptr ? dot + 1 : "", -1);
+  const gchar *mime = mime_for_extension(ext);
+
+  WebKitWebView *web_view = webkit_uri_scheme_request_get_web_view(request);
+  LinuxWebview *webview =
+      web_view != nullptr
+          ? static_cast<LinuxWebview *>(g_object_get_data(G_OBJECT(web_view), kInstanceKey))
+          : nullptr;
+
+  if (webview == nullptr || webview->disposed || webview->channel == nullptr ||
+      !webview->intercept_resources || !extension_is_intercepted(webview, ext)) {
+    finish_resource_request(request, reinterpret_cast<guchar *>(contents), length, mime);
+    return;
+  }
+
+  ResourceReplyContext *ctx = g_new0(ResourceReplyContext, 1);
+  ctx->request = static_cast<WebKitURISchemeRequest *>(g_object_ref(request));
+  ctx->webview = linux_webview_ref(webview);
+  ctx->mime = g_strdup(mime);
+  ctx->original = reinterpret_cast<guchar *>(contents);
+  ctx->original_length = length;
+
+  g_autofree gchar *encoded = g_base64_encode(ctx->original, length);
+  g_autoptr(FlValue) args = fl_value_new_map();
+  fl_value_set_string_take(args, "url", fl_value_new_string(uri));
+  fl_value_set_string_take(args, "data", fl_value_new_string(encoded));
+  fl_method_channel_invoke_method(webview->channel, "onLoadResource", args, nullptr,
+                                  resource_reply_cb, ctx);
+}
+
+void register_app_assets_scheme_once() {
+  static gboolean registered = FALSE;
+  if (registered) return;
+  registered = TRUE;
+  WebKitWebContext *context = webkit_web_context_get_default();
+  webkit_web_context_register_uri_scheme(context, "app-assets",
+                                         app_assets_request_cb, nullptr, nullptr);
+  // Une page `file://` doit pouvoir charger ce schéma (images, polices) :
+  // on le déclare local + CORS + sûr, comme `file://`.
+  G_GNUC_BEGIN_IGNORE_DEPRECATIONS
+  WebKitSecurityManager *security = webkit_web_context_get_security_manager(context);
+  webkit_security_manager_register_uri_scheme_as_local(security, "app-assets");
+  webkit_security_manager_register_uri_scheme_as_cors_enabled(security, "app-assets");
+  webkit_security_manager_register_uri_scheme_as_secure(security, "app-assets");
+  G_GNUC_END_IGNORE_DEPRECATIONS
+}
+
+}  // namespace
+
 LinuxWebview *create_linux_webview(WebviewPlusPlugin *self, gint64 view_id,
                                    FlValue *creation_params) {
   // WebKitGTK 2.42+ : le rendu DMA-BUF / mode compositing GL repose sur de
@@ -715,11 +908,19 @@ LinuxWebview *create_linux_webview(WebviewPlusPlugin *self, gint64 view_id,
   // dès que la Webview est hébergée hors écran puis capturée par pixels.
   // Doit être positionné AVANT le premier lancement du WebProcess ; ne
   // remplace jamais une valeur déjà définie par l'utilisateur (overwrite=FALSE).
-  g_setenv("WEBKIT_DISABLE_DMABUF_RENDERER", "1", FALSE);
-  g_setenv("WEBKIT_DISABLE_COMPOSITING_MODE", "1", FALSE);
+  // Ne concerne que le mode TEXTURE (capture de pixels d'une fenêtre X11
+  // cachée). En mode intégré WebKit se dessine normalement (GPU compris).
+  FlView *flutter_view = fl_plugin_registrar_get_view(self->registrar);
+  const gboolean embedded = linux_texture_bridge_can_embed(flutter_view);
+  if (!embedded) {
+    g_setenv("WEBKIT_DISABLE_DMABUF_RENDERER", "1", FALSE);
+    g_setenv("WEBKIT_DISABLE_COMPOSITING_MODE", "1", FALSE);
+  }
+  register_app_assets_scheme_once();
 
   LinuxWebview *webview = g_new0(LinuxWebview, 1);
   webview->ref_count = 1;
+  webview->embedded = embedded;
   webview->plugin = self;
   webview->view_id = view_id;
   webview->content_manager = webkit_user_content_manager_new();
@@ -751,8 +952,11 @@ LinuxWebview *create_linux_webview(WebviewPlusPlugin *self, gint64 view_id,
   // GDK_IS_WINDOW si on laisse l'accélération matérielle active. En la
   // désactivant, WebKitGTK bascule sur un rendu logiciel (Cairo), qui n'a
   // pas cette contrainte et fonctionne correctement dans un offscreen.
-  webkit_settings_set_hardware_acceleration_policy(
-      webkit_settings, WEBKIT_HARDWARE_ACCELERATION_POLICY_NEVER);
+  // Mode intégré : politique par défaut de WebKit (accélération à la demande).
+  if (!webview->embedded) {
+    webkit_settings_set_hardware_acceleration_policy(
+        webkit_settings, WEBKIT_HARDWARE_ACCELERATION_POLICY_NEVER);
+  }
   webkit_settings_set_enable_javascript(
       webkit_settings, map_lookup_bool(settings, "javaScriptEnabled", TRUE));
   if (const gchar *user_agent = map_lookup_string(settings, "userAgent")) {
@@ -817,6 +1021,26 @@ LinuxWebview *create_linux_webview(WebviewPlusPlugin *self, gint64 view_id,
       map_lookup_bool(settings, "disableLongPressContextMenuOnLinks", FALSE);
   webview->disable_printing = map_lookup_bool(settings, "disablePrinting", FALSE);
 
+  // `onLoadResource` : seulement si Dart a fourni le callback.
+  webview->intercept_resources =
+      map_lookup_bool(creation_params, "hasLoadResourceCallback", FALSE);
+  {
+    GPtrArray *extensions = g_ptr_array_new();
+    FlValue *list = map_lookup(settings, "interceptedResourceExtensions");
+    if (list != nullptr && fl_value_get_type(list) == FL_VALUE_TYPE_LIST) {
+      const size_t count = fl_value_get_length(list);
+      for (size_t i = 0; i < count; i++) {
+        FlValue *item = fl_value_get_list_value(list, i);
+        if (item != nullptr && fl_value_get_type(item) == FL_VALUE_TYPE_STRING) {
+          g_ptr_array_add(extensions, g_ascii_strdown(fl_value_get_string(item), -1));
+        }
+      }
+    }
+    g_ptr_array_add(extensions, nullptr);
+    webview->intercepted_extensions =
+        reinterpret_cast<gchar **>(g_ptr_array_free(extensions, FALSE));
+  }
+
   gint64 selection_color = map_lookup_int(settings, "selectionHandleColor", 0);
   if (selection_color != 0) {
     const gint a = (selection_color >> 24) & 0xFF;
@@ -869,6 +1093,11 @@ LinuxWebview *create_linux_webview(WebviewPlusPlugin *self, gint64 view_id,
       webview->content_manager, "WebviewPlusJsHandler");
   webkit_user_content_manager_register_script_message_handler(
       webview->content_manager, "WebviewPlusDomContentLoaded");
+  webkit_user_content_manager_register_script_message_handler(
+      webview->content_manager, "WebviewPlusPageCommitVisible");
+  g_signal_connect(webview->content_manager,
+                   "script-message-received::WebviewPlusPageCommitVisible",
+                   G_CALLBACK(page_commit_visible_message_cb), webview);
   g_signal_connect(webview->content_manager,
                    "script-message-received::WebviewPlusChannel",
                    G_CALLBACK(channel_message_cb), webview);
@@ -885,6 +1114,8 @@ LinuxWebview *create_linux_webview(WebviewPlusPlugin *self, gint64 view_id,
                    G_CALLBACK(load_changed_cb), webview);
   g_signal_connect(webview->web_view, "load-failed",
                    G_CALLBACK(load_failed_cb), webview);
+  g_signal_connect(webview->web_view, "notify::estimated-load-progress",
+                   G_CALLBACK(progress_changed_cb), webview);
   g_signal_connect(webview->web_view, "context-menu",
                    G_CALLBACK(context_menu_cb), webview);
   g_signal_connect(webview->web_view, "print",
@@ -898,9 +1129,18 @@ LinuxWebview *create_linux_webview(WebviewPlusPlugin *self, gint64 view_id,
   // restait toujours peint au-dessus de tout le contenu Flutter, y compris
   // les dialogs). `linux_texture_bridge_new` parente immédiatement
   // `web_view` dans son GtkOffscreenWindow interne.
-  webview->bridge = linux_texture_bridge_new(
-      fl_plugin_registrar_get_texture_registrar(self->registrar),
-      webview->web_view);
+  if (webview->embedded) {
+    webview->bridge = linux_texture_bridge_new_embedded(webview->web_view,
+                                                        flutter_view);
+  } else {
+    g_message(
+        "webview_plus: mode texture (lent et instable sur les moteurs "
+        "Flutter récents). Voir la section Linux du README pour le mode "
+        "intégré (GtkOverlay dans my_application.cc).");
+    webview->bridge = linux_texture_bridge_new(
+        fl_plugin_registrar_get_texture_registrar(self->registrar),
+        webview->web_view);
+  }
   webview->texture_id = linux_texture_bridge_start(webview->bridge);
   // Taille de départ raisonnable ; `setSize` (voir `root_method_call_cb`)
   // la mettra à jour dès que Dart connaît la taille réelle du widget
@@ -978,6 +1218,8 @@ void root_method_call_cb(FlMethodChannel *channel, FlMethodCall *method_call,
     g_autoptr(FlValue) response = fl_value_new_map();
     fl_value_set_string_take(response, "textureId",
                              fl_value_new_int(webview->texture_id));
+    fl_value_set_string_take(response, "embedded",
+                             fl_value_new_bool(webview->embedded));
     respond(method_call, success_response(response));
     return;
   }
@@ -1016,6 +1258,18 @@ void root_method_call_cb(FlMethodChannel *channel, FlMethodCall *method_call,
       webview->frame_height = pixel_height;
       linux_texture_bridge_resize(webview->bridge, pixel_width, pixel_height);
     }
+    respond(method_call, success_response());
+    return;
+  }
+
+  if (strcmp(method, "setRect") == 0) {
+    // Mode intégré : rectangle du widget Dart en pixels LOGIQUES, relatif à
+    // la FlView (voir `_LinuxEmbeddedHole` côté Dart).
+    const gint x = static_cast<gint>(map_lookup_double(args, "x", 0) + 0.5);
+    const gint y = static_cast<gint>(map_lookup_double(args, "y", 0) + 0.5);
+    const gint width = static_cast<gint>(map_lookup_double(args, "width", 0) + 0.5);
+    const gint height = static_cast<gint>(map_lookup_double(args, "height", 0) + 0.5);
+    linux_texture_bridge_set_rect(webview->bridge, x, y, width, height);
     respond(method_call, success_response());
     return;
   }

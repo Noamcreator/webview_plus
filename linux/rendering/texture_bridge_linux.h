@@ -26,6 +26,29 @@ G_BEGIN_DECLS
 // côté Windows en mode composition ("windowless").
 typedef struct _LinuxTextureBridge LinuxTextureBridge;
 
+// -- Mode intégré (recommandé) ----------------------------------------------
+//
+// Au lieu de capturer le WebKitWebView dans une texture (lent, et
+// `FlPixelBufferTexture` est instable sur les moteurs récents : erreurs
+// `glGetError 501`), le WebKitWebView est un VRAI widget GTK placé SOUS la
+// FlView, dans un `GtkFixed`. La FlView (fond transparent) est dessinée par
+// dessus ; côté Dart, le widget Webview "perce" un trou transparent
+// (`BlendMode.clear`) à son emplacement et indique son rectangle via
+// `setRect`. Résultat : WebKit se dessine nativement (fluide, GPU), et les
+// widgets Flutter (dialogs, barres, spinners) restent AU-DESSUS.
+//
+// Prérequis côté application (runner) : la FlView doit être un enfant
+// `GtkOverlay` dont l'enfant principal est un `GtkFixed` (voir
+// `my_application.cc` fourni). Sinon, repli automatique sur le mode texture.
+// Forçage du repli : variable d'environnement WEBVIEW_PLUS_LINUX_MODE=texture.
+gboolean linux_texture_bridge_can_embed(FlView *view);
+LinuxTextureBridge *linux_texture_bridge_new_embedded(WebKitWebView *web_view,
+                                                      FlView *view);
+gboolean linux_texture_bridge_is_embedded(LinuxTextureBridge *bridge);
+// Rectangle en pixels LOGIQUES, relatif à l'angle haut-gauche de la FlView.
+void linux_texture_bridge_set_rect(LinuxTextureBridge *bridge, int x, int y,
+                                   int width, int height);
+
 // `registrar` : le FlTextureRegistrar du moteur
 // (fl_plugin_registrar_get_texture_registrar).
 // `web_view`  : la WebKitWebView à héberger hors écran. Doit avoir déjà été
