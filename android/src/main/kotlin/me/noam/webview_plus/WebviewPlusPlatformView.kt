@@ -115,6 +115,9 @@ internal class WebviewPlusEventChannel {
     }
 }
 
+private const val SIZE_PROPAGATION_DELAY_MS = 32L
+private const val SIZE_WAIT_TIMEOUT_MS = 2_000L
+
 class WebviewPlusPlatformView(
     context: Context,
     messenger: BinaryMessenger?,
@@ -245,6 +248,58 @@ class WebviewPlusPlatformView(
             initialData != null -> loadInitialData(initialData)
             else -> {}
         }
+    }
+
+    private var eventsDelivered = false
+
+    /// Livre les événements en file d'attente (`onDOMContentLoaded`...) une
+    /// fois la Webview DIMENSIONNÉE (largeur et hauteur > 0), pas avant.
+    ///
+    /// Une page préchargée a déjà atteint `DOMContentLoaded` : si ses
+    /// événements étaient rejoués dès la création du widget Dart, Dart
+    /// exécuterait son script d'initialisation (ex. `initFromFlutter`, qui
+    /// fige la mise en page sur `window.innerWidth/innerHeight`) alors que
+    /// Flutter n'a pas encore donné sa taille à la vue native : la page se
+    /// figerait à 0x0 et resterait invisible (seul le reste de l'écran
+    /// s'affiche). Avec un chargement normal, la durée du chargement de la
+    /// page laissait toujours le temps à la vue d'être dimensionnée.
+    private fun deliverEventsWhenSized() {
+        if (eventsDelivered) return
+
+        fun deliver() {
+            if (eventsDelivered) return
+            eventsDelivered = true
+            channel.markReady()
+        }
+
+        fun isSized() = webView.width > 0 && webView.height > 0
+
+        if (isSized()) {
+            deliver()
+            return
+        }
+
+        val layoutListener = object : View.OnLayoutChangeListener {
+            override fun onLayoutChange(
+                v: View?, left: Int, top: Int, right: Int, bottom: Int,
+                oldLeft: Int, oldTop: Int, oldRight: Int, oldBottom: Int
+            ) {
+                if (isSized()) {
+                    webView.removeOnLayoutChangeListener(this)
+                    // Une frame de marge : Chromium transmet la nouvelle taille
+                    // au processus de rendu avant que le JS de Dart ne s'exécute.
+                    mainHandler.postDelayed({ deliver() }, SIZE_PROPAGATION_DELAY_MS)
+                }
+            }
+        }
+        webView.addOnLayoutChangeListener(layoutListener)
+
+        // Filet de sécurité : ne jamais retenir les événements indéfiniment
+        // (vue masquée, hors écran...).
+        mainHandler.postDelayed({
+            webView.removeOnLayoutChangeListener(layoutListener)
+            deliver()
+        }, SIZE_WAIT_TIMEOUT_MS)
     }
 
     /// Rattache une Webview préchargée (créée détachée par
@@ -1152,7 +1207,7 @@ class WebviewPlusPlatformView(
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
         when (call.method) {
             "ready" -> {
-                channel.markReady()
+                deliverEventsWhenSized()
                 result.success(null)
             }
             "loadUrl" -> {

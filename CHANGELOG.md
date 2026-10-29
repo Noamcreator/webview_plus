@@ -1,3 +1,7 @@
+## 0.9.2
+- Android : les événements d'une Webview préchargée ne sont plus rejoués dès la création du widget Dart mais seulement une fois la vue dimensionnée (largeur/hauteur > 0). Sinon un script d'initialisation qui fige sa mise en page sur `window.innerWidth/innerHeight` (ex. `initFromFlutter`) s'exécutait à 0x0 : page invisible, seul le reste de l'écran s'affichait.
+- Android : une page préchargée est rechargée 1 s (au lieu de 1,5 s) après son adoption.
+
 ## 0.9.1
 
 - Nouveau `controller.requestFocus()` (toutes plateformes) : donne le focus clavier à la Webview, ex. depuis un handler JS `requestWebViewFocus`. Android `requestFocus()`, macOS first responder, Linux/Windows focus Flutter du widget (+ focus-in WebKit sur Linux), Web `iframe.focus()`.

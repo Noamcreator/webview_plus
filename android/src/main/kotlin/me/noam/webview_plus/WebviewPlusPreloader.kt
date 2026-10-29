@@ -68,7 +68,7 @@ object WebviewPlusPreloader {
     // gardés pour recharger une instance après chaque adoption.
     private val preloadedPages = ArrayList<WebviewPlusPlatformView>()
     private var lastPreloadParams: Map<String, Any?>? = null
-    private const val PRELOAD_REFILL_DELAY_MS = 1_500L
+    private const val PRELOAD_REFILL_DELAY_MS = 1_000L
 
     /// WebView dont le Context est un `MutableContextWrapper` : rebranché
     /// sur l'Activité à l'adoption (voir `WebviewPlusPlatformView`), ce qui
