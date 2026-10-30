@@ -1,4 +1,3 @@
-import 'package:flutter/rendering.dart';
 import 'package:flutter/widgets.dart';
 
 /// Emplacement d'une Webview Linux en **mode intégré** (voir
@@ -32,6 +31,7 @@ class LinuxEmbeddedHole extends LeafRenderObjectWidget {
   @override
   void updateRenderObject(
     BuildContext context,
+    // ignore: library_private_types_in_public_api
     covariant _RenderLinuxEmbeddedHole renderObject,
   ) {
     renderObject.onRectChanged = onRectChanged;

@@ -556,7 +556,6 @@ class WebviewBaseController implements WebviewPlusController {
     return _channel.invokeMethod<void>('injectCSSFileFromAsset', {'assetFilePath': assetFilePath});
   }
 
-  @override
   /// Donne le focus au widget Webview côté Flutter. Renseigné par
   /// `WebviewWidget` (indispensable sur Linux/Windows, où le clavier arrive
   /// via un `Focus` Flutter puis est retransmis à la vue native).

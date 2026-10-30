@@ -1,7 +1,7 @@
-import 'dart:io'; // AJOUTÉ pour manipuler les fichiers locaux
-import 'package:flutter/services.dart'; // AJOUTÉ pour lire les assets de l'application
-import 'package:path/path.dart' as p; // AJOUTÉ pour manipuler les chemins
-import 'package:path_provider/path_provider.dart'; // AJOUTÉ pour récupérer le dossier de l'app
+import 'dart:io';
+import 'package:flutter/services.dart';
+import 'package:path/path.dart' as p;
+import 'package:path_provider/path_provider.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:webview_plus/webview_plus.dart';
@@ -510,7 +510,7 @@ class _WebviewDemoPageState extends State<WebviewDemoPage>
               for (final c in _palette)
                 _ColorSwatch(
                   color: c,
-                  selected: current?.value == c.value,
+                  selected: current?.toARGB32() == c.toARGB32(),
                   onTap: () => Navigator.of(context).pop<Color?>(c),
                 ),
             ],
@@ -1345,7 +1345,7 @@ class _WebviewDemoPageState extends State<WebviewDemoPage>
     return ListView.separated(
       padding: const EdgeInsets.all(8),
       itemCount: _log.length,
-      separatorBuilder: (_, __) => const Divider(height: 8),
+      separatorBuilder: (_, _) => const Divider(height: 8),
       itemBuilder: (context, index) => Text(
         _log[index],
         style: const TextStyle(fontFamily: 'monospace', fontSize: 12),

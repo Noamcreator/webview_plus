@@ -232,7 +232,7 @@ packages:
     source: hosted
     version: "2.2.0"
   path:
-    dependency: transitive
+    dependency: "direct main"
     description:
       name: path
       sha256: "75cca69d1490965be98c73ceaea117e8a04dd21217b37b292c9ddbec0d955bc5"
@@ -434,7 +434,7 @@ packages:
       path: ".."
       relative: true
     source: path
-    version: "0.9.2"
+    version: "0.9.3"
   xdg_directories:
     dependency: transitive
     description:

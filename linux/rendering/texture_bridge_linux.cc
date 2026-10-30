@@ -44,6 +44,28 @@ constexpr int kOffscreenY = -10000;
 constexpr guint kCaptureIntervalMs = 16;        // ~60 fps max
 constexpr gint64 kIdleRefreshUs = 250 * 1000;   // filet de sécurité
 constexpr gint kDirtyFramesOnDraw = 3;
+
+// Flutter (Linux) convertit un cran de molette GDK (delta = 1.0) en 53 pixels
+// logiques (`kScrollOffsetMultiplier` dans fl_scrolling_manager.cc). GTK /
+// WebKitGTK attendent au contraire des deltas en « crans » : sans cette
+// division, WebKit reçoit 53 crans par cran réel (scroll ~50x trop rapide).
+constexpr double kFlutterPixelsPerScrollTick = 53.0;
+
+// Facteur de vitesse optionnel (défaut 1.0), ex : WEBVIEW_PLUS_SCROLL_SPEED=0.7
+double scroll_speed_factor() {
+  static const double factor = [] {
+    const gchar *env = g_getenv("WEBVIEW_PLUS_SCROLL_SPEED");
+    if (env == nullptr) return 1.0;
+    const double v = g_ascii_strtod(env, nullptr);
+    return v > 0.0 ? v : 1.0;
+  }();
+  return factor;
+}
+
+// Anti-scintillement (maximisation / plein écran) : la webview est masquée
+// pendant la transition et réaffichée quand la géométrie s'est stabilisée.
+constexpr guint kResumeQuietMs = 150;          // silence requis avant réaffichage
+constexpr gint64 kResumeMaxUs = 1000 * 1000;   // plafond : jamais masquée > 1 s
 }  // namespace
 
 struct _LinuxTextureBridge {
@@ -62,10 +84,23 @@ struct _LinuxTextureBridge {
   gboolean stopped;
 
   // Mode intégré (voir texture_bridge_linux.h) : pas de fenêtre hôte, pas de
-  // texture ; `web_view` vit dans `fixed`, sous la FlView.
+  // texture ; `web_view` est un enfant overlay sous la FlView.
   gboolean embedded;
-  GtkWidget *fixed;
   gboolean focus_sent;
+
+  // `web_view` est un enfant « overlay » (placé SOUS la FlView). Sa géométrie
+  // est fournie par le signal `get-child-position` : aucune size_request, donc
+  // aucune taille minimale imposée à la fenêtre (elle peut rétrécir).
+  GtkWidget *overlay;   // weak pointer
+  GtkWidget *toplevel;  // weak pointer
+  gulong child_position_handler_id;
+  gulong window_state_handler_id;
+  GdkRectangle rect;    // pixels logiques, relatif à la FlView
+
+  // Anti-scintillement pendant maximisation / plein écran.
+  gboolean suspended;
+  gint64 suspend_start_us;
+  guint resume_timeout_id;
 };
 
 // -- Sous-classe GObject de FlPixelBufferTexture --------------------------
@@ -320,26 +355,112 @@ gboolean linux_texture_bridge_can_embed(FlView *view) {
   if (forced != nullptr && g_ascii_strcasecmp(forced, "texture") == 0) {
     return FALSE;
   }
+  // Il suffit que la FlView soit un enfant overlay d'un GtkOverlay (son enfant
+  // principal peut être n'importe quel widget, p.ex. un GtkFixed vide).
   GtkWidget *parent = gtk_widget_get_parent(GTK_WIDGET(view));
   if (parent == nullptr || !GTK_IS_OVERLAY(parent)) return FALSE;
-  GtkWidget *main_child = gtk_bin_get_child(GTK_BIN(parent));
-  return main_child != nullptr && GTK_IS_FIXED(main_child);
+  return gtk_bin_get_child(GTK_BIN(parent)) != GTK_WIDGET(view);
 }
+
+namespace {
+
+gboolean on_overlay_get_child_position(GtkOverlay *, GtkWidget *widget,
+                                       GdkRectangle *allocation,
+                                       gpointer user_data) {
+  auto *bridge = static_cast<LinuxTextureBridge *>(user_data);
+  if (bridge->web_view == nullptr || widget != GTK_WIDGET(bridge->web_view)) {
+    return FALSE;
+  }
+  *allocation = bridge->rect;
+  return TRUE;
+}
+
+gboolean on_resume_timeout(gpointer user_data) {
+  auto *bridge = static_cast<LinuxTextureBridge *>(user_data);
+  bridge->resume_timeout_id = 0;
+  if (bridge->stopped || !bridge->suspended) return G_SOURCE_REMOVE;
+  bridge->suspended = FALSE;
+  if (bridge->web_view != nullptr) {
+    gtk_widget_show(GTK_WIDGET(bridge->web_view));
+    gtk_widget_queue_draw(GTK_WIDGET(bridge->web_view));
+  }
+  if (bridge->overlay != nullptr) gtk_widget_queue_draw(bridge->overlay);
+  return G_SOURCE_REMOVE;
+}
+
+// (Ré)arme le réaffichage : on attend `kResumeQuietMs` sans nouvelle activité
+// (changement d'état de fenêtre, nouveau `setRect`) avant de remontrer la
+// webview, avec un plafond de `kResumeMaxUs` depuis le masquage.
+void arm_resume(LinuxTextureBridge *bridge) {
+  if (bridge->resume_timeout_id != 0) {
+    g_source_remove(bridge->resume_timeout_id);
+    bridge->resume_timeout_id = 0;
+  }
+  const bool overdue =
+      g_get_monotonic_time() - bridge->suspend_start_us > kResumeMaxUs;
+  bridge->resume_timeout_id =
+      g_timeout_add(overdue ? 1 : kResumeQuietMs, on_resume_timeout, bridge);
+}
+
+void suspend_webview(LinuxTextureBridge *bridge) {
+  if (bridge->stopped || bridge->web_view == nullptr) return;
+  if (!bridge->suspended) {
+    bridge->suspended = TRUE;
+    bridge->suspend_start_us = g_get_monotonic_time();
+    gtk_widget_hide(GTK_WIDGET(bridge->web_view));
+  }
+  arm_resume(bridge);
+}
+
+gboolean on_toplevel_window_state(GtkWidget *, GdkEventWindowState *event,
+                                  gpointer user_data) {
+  const GdkWindowState mask = static_cast<GdkWindowState>(
+      GDK_WINDOW_STATE_MAXIMIZED | GDK_WINDOW_STATE_FULLSCREEN |
+      GDK_WINDOW_STATE_TILED);
+  if (event->changed_mask & mask) {
+    suspend_webview(static_cast<LinuxTextureBridge *>(user_data));
+  }
+  return FALSE;  // ne pas court-circuiter les autres handlers
+}
+
+}  // namespace
 
 LinuxTextureBridge *linux_texture_bridge_new_embedded(WebKitWebView *web_view,
                                                       FlView *view) {
   GtkWidget *overlay = gtk_widget_get_parent(GTK_WIDGET(view));
-  GtkWidget *fixed = gtk_bin_get_child(GTK_BIN(overlay));
 
   LinuxTextureBridge *bridge = g_new0(LinuxTextureBridge, 1);
   bridge->web_view = web_view;
   bridge->embedded = TRUE;
-  bridge->fixed = fixed;
+  bridge->rect = {0, 0, 1, 1};
 
-  // Taille de départ minimale : `setRect` (Dart) donne la vraie géométrie
-  // dès que le widget est mis en page.
+  // Enfant overlay SOUS la FlView (index 0 = tout en bas des overlays).
+  // Contrairement à un GtkFixed + set_size_request, un enfant overlay dont la
+  // position vient de `get-child-position` n'influence PAS la taille minimale
+  // de la fenêtre.
   gtk_widget_set_size_request(GTK_WIDGET(web_view), 1, 1);
-  gtk_fixed_put(GTK_FIXED(fixed), GTK_WIDGET(web_view), 0, 0);
+  gtk_widget_set_halign(GTK_WIDGET(web_view), GTK_ALIGN_START);
+  gtk_widget_set_valign(GTK_WIDGET(web_view), GTK_ALIGN_START);
+  gtk_overlay_add_overlay(GTK_OVERLAY(overlay), GTK_WIDGET(web_view));
+  gtk_overlay_reorder_overlay(GTK_OVERLAY(overlay), GTK_WIDGET(web_view), 0);
+
+  bridge->overlay = overlay;
+  g_object_add_weak_pointer(G_OBJECT(overlay),
+                            reinterpret_cast<gpointer *>(&bridge->overlay));
+  bridge->child_position_handler_id = g_signal_connect(
+      overlay, "get-child-position",
+      G_CALLBACK(on_overlay_get_child_position), bridge);
+
+  GtkWidget *toplevel = gtk_widget_get_toplevel(overlay);
+  if (toplevel != nullptr && GTK_IS_WINDOW(toplevel)) {
+    bridge->toplevel = toplevel;
+    g_object_add_weak_pointer(G_OBJECT(toplevel),
+                              reinterpret_cast<gpointer *>(&bridge->toplevel));
+    bridge->window_state_handler_id = g_signal_connect(
+        toplevel, "window-state-event",
+        G_CALLBACK(on_toplevel_window_state), bridge);
+  }
+
   gtk_widget_show(GTK_WIDGET(web_view));
   return bridge;
 }
@@ -354,8 +475,23 @@ void linux_texture_bridge_set_rect(LinuxTextureBridge *bridge, int x, int y,
       bridge->web_view == nullptr || width <= 0 || height <= 0) {
     return;
   }
-  gtk_fixed_move(GTK_FIXED(bridge->fixed), GTK_WIDGET(bridge->web_view), x, y);
-  gtk_widget_set_size_request(GTK_WIDGET(bridge->web_view), width, height);
+  const GdkRectangle rect = {x, y, width, height};
+  const bool changed = rect.x != bridge->rect.x || rect.y != bridge->rect.y ||
+                       rect.width != bridge->rect.width ||
+                       rect.height != bridge->rect.height;
+  bridge->rect = rect;
+  // Pendant une transition de fenêtre, chaque nouveau rectangle prolonge le
+  // masquage jusqu'à stabilisation.
+  if (bridge->suspended) arm_resume(bridge);
+  if (changed) {
+    // La size_request est NÉCESSAIRE pour qu'un enfant overlay reçoive la
+    // taille voulue (sinon il est alloué en 1x1) ; elle ne contraint PAS la
+    // fenêtre : GtkOverlay ignore ses enfants overlay dans sa taille minimale
+    // (vérifié : la fenêtre peut devenir plus petite que la webview). C'est
+    // ce qui différencie ce mode de l'ancien GtkFixed.
+    gtk_widget_set_size_request(GTK_WIDGET(bridge->web_view), width, height);
+    if (bridge->overlay != nullptr) gtk_widget_queue_allocate(bridge->overlay);
+  }
 }
 
 int64_t linux_texture_bridge_start(LinuxTextureBridge *bridge) {
@@ -530,8 +666,11 @@ void linux_texture_bridge_dispatch_pointer(LinuxTextureBridge *bridge,
     event->scroll.x_root = x;
     event->scroll.y_root = y;
     event->scroll.direction = GDK_SCROLL_SMOOTH;
-    event->scroll.delta_x = scroll_dx;
-    event->scroll.delta_y = scroll_dy;
+    // Flutter fournit des pixels, GTK attend des crans (voir
+    // `kFlutterPixelsPerScrollTick`).
+    const double factor = scroll_speed_factor() / kFlutterPixelsPerScrollTick;
+    event->scroll.delta_x = scroll_dx * factor;
+    event->scroll.delta_y = scroll_dy * factor;
     event->scroll.state = bridge->pressed_buttons_mask;
     event->scroll.device = pointer;
     gtk_main_do_event(event);
@@ -573,6 +712,32 @@ void linux_texture_bridge_dispatch_key(LinuxTextureBridge *bridge, GdkEventType 
 void linux_texture_bridge_stop(LinuxTextureBridge *bridge) {
   if (bridge == nullptr || bridge->stopped) return;
   bridge->stopped = TRUE;
+  if (bridge->resume_timeout_id != 0) {
+    g_source_remove(bridge->resume_timeout_id);
+    bridge->resume_timeout_id = 0;
+  }
+  if (bridge->overlay != nullptr) {
+    if (bridge->child_position_handler_id != 0) {
+      g_signal_handler_disconnect(bridge->overlay,
+                                  bridge->child_position_handler_id);
+    }
+    g_object_remove_weak_pointer(
+        G_OBJECT(bridge->overlay),
+        reinterpret_cast<gpointer *>(&bridge->overlay));
+    bridge->overlay = nullptr;
+  }
+  bridge->child_position_handler_id = 0;
+  if (bridge->toplevel != nullptr) {
+    if (bridge->window_state_handler_id != 0) {
+      g_signal_handler_disconnect(bridge->toplevel,
+                                  bridge->window_state_handler_id);
+    }
+    g_object_remove_weak_pointer(
+        G_OBJECT(bridge->toplevel),
+        reinterpret_cast<gpointer *>(&bridge->toplevel));
+    bridge->toplevel = nullptr;
+  }
+  bridge->window_state_handler_id = 0;
   if (bridge->capture_timeout_id != 0) {
     g_source_remove(bridge->capture_timeout_id);
     bridge->capture_timeout_id = 0;

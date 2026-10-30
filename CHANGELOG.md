@@ -1,3 +1,10 @@
+## 0.9.3
+# Linux (mode intégré) : trois correctifs
+- Redimensionnement : la fenêtre pouvait grandir mais plus rétrécir. Le WebKitWebView était un enfant de `GtkFixed` avec `set_size_request`, ce qui imposait sa taille comme taille minimale de toute la fenêtre. Il est maintenant un enfant `GtkOverlay` (sous la FlView) positionné via le signal `get-child-position` ; GtkOverlay ignore ses enfants overlay dans sa taille minimale. Le `my_application.cc` existant (FlView overlay + enfant principal `GtkFixed`) reste compatible ; l'enfant principal peut être n'importe quel widget.
+- Molette trop rapide : Flutter envoie des pixels (53 par cran) alors que GTK attend des crans. Les deltas sont divisés par 53 avant d'être envoyés à WebKit. Réglage optionnel : variable d'environnement `WEBVIEW_PLUS_SCROLL_SPEED` (ex. `0.7` plus lent, `1.5` plus rapide).
+- Plein écran / maximisation (double-clic barre de titre) : double rendu et clignotement, car la Webview gardait l'ancien rectangle 1-2 frames pendant que Flutter avait déjà percé le trou à la nouvelle taille. La Webview est masquée pendant le changement d'état (maximisé/plein écran/tiled) puis réaffichée dès que `setRect` s'est stabilisé (150 ms sans changement, 1 s max).
+- `example/linux/runner/my_application.cc` : mis à jour avec le GtkOverlay + fond transparent (l'ancien exemple était le runner Flutter standard, donc en mode texture).
+
 ## 0.9.2
 - Android : les événements d'une Webview préchargée ne sont plus rejoués dès la création du widget Dart mais seulement une fois la vue dimensionnée (largeur/hauteur > 0). Sinon un script d'initialisation qui fige sa mise en page sur `window.innerWidth/innerHeight` (ex. `initFromFlutter`) s'exécutait à 0x0 : page invisible, seul le reste de l'écran s'affichait.
 - Android : une page préchargée est rechargée 1 s (au lieu de 1,5 s) après son adoption.

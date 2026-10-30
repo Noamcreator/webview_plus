@@ -59,13 +59,32 @@ static void my_application_activate(GApplication* application) {
       project, self->dart_entrypoint_arguments);
 
   FlView* view = fl_view_new(project);
+  // Fond TRANSPARENT : en mode intégré, webview_plus place le WebKitWebView
+  // SOUS la FlView et Flutter « perce » un trou à son emplacement.
   GdkRGBA background_color;
-  // Background defaults to black, override it here if necessary, e.g. #00000000
-  // for transparent.
-  gdk_rgba_parse(&background_color, "#000000");
+  gdk_rgba_parse(&background_color, "#00000000");
   fl_view_set_background_color(view, &background_color);
   gtk_widget_show(GTK_WIDGET(view));
-  gtk_container_add(GTK_CONTAINER(window), GTK_WIDGET(view));
+
+  // GtkOverlay : enfant principal = widget de fond (vide), FlView = overlay.
+  // Les Webviews sont ajoutées par le plugin comme overlays SOUS la FlView.
+  // (Ne pas mettre la FlView comme enfant principal.)
+  GtkWidget* overlay = gtk_overlay_new();
+  GtkWidget* backdrop = gtk_fixed_new();
+  gtk_container_add(GTK_CONTAINER(overlay), backdrop);
+  gtk_overlay_add_overlay(GTK_OVERLAY(overlay), GTK_WIDGET(view));
+  gtk_widget_show(backdrop);
+  gtk_widget_show(overlay);
+  gtk_container_add(GTK_CONTAINER(window), overlay);
+
+  // Noir derrière la vue (ce que voyait l'ancien fond de la FlView).
+  GtkCssProvider* css = gtk_css_provider_new();
+  gtk_css_provider_load_from_data(css, "window { background-color: #000000; }",
+                                  -1, nullptr);
+  gtk_style_context_add_provider_for_screen(
+      gdk_screen_get_default(), GTK_STYLE_PROVIDER(css),
+      GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+  g_object_unref(css);
 
   // Show the window when Flutter renders.
   // Requires the view to be realized so we can start rendering.

@@ -152,8 +152,8 @@ String _cssColor(int argb) {
 class WebviewPlusWebController implements WebviewPlusController {
   WebviewPlusWebController(
     this._iframe, {
-    required void Function(Uri target) onNavigationStart,
-  }) : _onNavigationStart = onNavigationStart;
+    required this._onNavigationStart,
+  });
 
   final web.HTMLIFrameElement _iframe;
   final void Function(Uri target) _onNavigationStart;
