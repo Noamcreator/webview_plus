@@ -30,17 +30,20 @@ typedef struct _LinuxTextureBridge LinuxTextureBridge;
 //
 // Au lieu de capturer le WebKitWebView dans une texture (lent, et
 // `FlPixelBufferTexture` est instable sur les moteurs récents : erreurs
-// `glGetError 501`), le WebKitWebView est un VRAI widget GTK placé SOUS la
-// FlView, dans un `GtkFixed`. La FlView (fond transparent) est dessinée par
-// dessus ; côté Dart, le widget Webview "perce" un trou transparent
+// `glGetError 501`), le WebKitWebView est un VRAI widget GTK, enfant
+// « overlay » placé SOUS la FlView. La FlView (fond transparent) est dessinée
+// par dessus ; côté Dart, le widget Webview "perce" un trou transparent
 // (`BlendMode.clear`) à son emplacement et indique son rectangle via
 // `setRect`. Résultat : WebKit se dessine nativement (fluide, GPU), et les
 // widgets Flutter (dialogs, barres, spinners) restent AU-DESSUS.
 //
 // Prérequis côté application (runner) : la FlView doit être un enfant
-// `GtkOverlay` dont l'enfant principal est un `GtkFixed` (voir
-// `my_application.cc` fourni). Sinon, repli automatique sur le mode texture.
-// Forçage du repli : variable d'environnement WEBVIEW_PLUS_LINUX_MODE=texture.
+// OVERLAY d'un `GtkOverlay` (voir `my_application.cc` fourni). Sinon (c'est le
+// cas des fenêtres secondaires créées par le moteur), repli automatique sur le
+// mode texture. Forçage du repli : WEBVIEW_PLUS_LINUX_MODE=texture.
+//
+// `view` doit être la FlView qui AFFICHE le widget Dart (fenêtre principale
+// ou secondaire) : voir `find_flutter_view` dans `linux_webview.cc`.
 gboolean linux_texture_bridge_can_embed(FlView *view);
 LinuxTextureBridge *linux_texture_bridge_new_embedded(WebKitWebView *web_view,
                                                       FlView *view);
@@ -51,6 +54,15 @@ void linux_texture_bridge_request_focus(LinuxTextureBridge *bridge);
 // Rectangle en pixels LOGIQUES, relatif à l'angle haut-gauche de la FlView.
 void linux_texture_bridge_set_rect(LinuxTextureBridge *bridge, int x, int y,
                                    int width, int height);
+// Visibilité pilotée par Dart : la Webview est masquée quand son widget n'est
+// plus à l'écran (page recouverte par une autre route, etc.) et, à
+// l'affichage, remontée AU-DESSUS des autres Webviews (mais sous la FlView).
+void linux_texture_bridge_set_visible(LinuxTextureBridge *bridge,
+                                      gboolean visible);
+// À appeler quand WebKit affiche son menu contextuel natif : le relâchement
+// (synthétique) du clic droit qui suit est alors absorbé, pour ne pas
+// activer un élément du menu par erreur.
+void linux_texture_bridge_note_context_menu(LinuxTextureBridge *bridge);
 
 // `registrar` : le FlTextureRegistrar du moteur
 // (fl_plugin_registrar_get_texture_registrar).

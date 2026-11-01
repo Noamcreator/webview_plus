@@ -29,5 +29,6 @@ migrate_working_dir/
 **/doc/api/
 .dart_tool/
 .flutter-plugins-dependencies
+**/ephemeral/
 /build/
 /coverage/

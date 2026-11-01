@@ -1,3 +1,4 @@
+#include <dlfcn.h>
 #include "webview/webview_internal.h"
 #include "common/method_channel_utils.h"
 
@@ -323,6 +324,9 @@ static gboolean load_failed_cb(WebKitWebView *widget,
 // désactivation individuelle des entrées par défaut
 // (`disabledDefaultContextMenuItems`) sont réservées à Android/iOS.
 //
+// Mode intégré : le menu natif WebKit est affiché (désactivable par
+// `disableContextMenu`). Mode texture (ci-dessous) : toujours supprimé.
+//
 // IMPORTANT (mode texture) : le menu contextuel de WebKitGTK est une vraie
 // fenêtre GTK, positionnée en coordonnées ÉCRAN ABSOLUES à partir de
 // l'événement d'origine. Or `web_view` est désormais hébergé dans une
@@ -341,30 +345,17 @@ static gboolean context_menu_cb(WebKitWebView *web_view,
                                 GdkEvent *event,
                                 WebKitHitTestResult *hit_test_result,
                                 gpointer user_data) {
-  // Voir le commentaire au-dessus de cette fonction : sa position réelle
-  // sur l'écran serait de toute façon incorrecte, donc on le masque
-  // toujours, indépendamment de `disable_context_menu`.
   (void)web_view;
-  (void)context_menu;
   (void)event;
-  (void)hit_test_result;
-  (void)user_data;
-  return TRUE;
-}
-
-// Ancienne logique de filtrage fine (désactivation ciblée, retrait de
-// l'entrée "Imprimer"...), conservée mais non appelée tant que le menu
-// natif reste entièrement supprimé ci-dessus. Réutilisable telle quelle
-// le jour où un menu contextuel Flutter custom remplacera l'affichage
-// natif (elle resterait pertinente pour décider QUELS items renvoyer à
-// Dart).
-[[maybe_unused]] static gboolean context_menu_filtering_reference(
-    WebKitWebView *web_view, WebKitContextMenu *context_menu, GdkEvent *event,
-    WebKitHitTestResult *hit_test_result, gpointer user_data) {
   LinuxWebview *webview = static_cast<LinuxWebview *>(user_data);
-  if (webview->disable_context_menu) {
-    return TRUE;  // Retourner TRUE sans toucher au menu = aucun menu affiché.
-  }
+
+  // Mode texture : la Webview vit dans une fenêtre hors écran, le menu
+  // s'ouvrirait à une position écran absurde -> toujours supprimé.
+  if (!webview->embedded) return TRUE;
+
+  // Mode intégré : vrai widget à l'écran, le menu natif WebKit s'affiche au
+  // bon endroit. Désactivable via `WebviewSettings.disableContextMenu`.
+  if (webview->disable_context_menu) return TRUE;
   if (webview->disable_long_press_links &&
       webkit_hit_test_result_context_is_link(hit_test_result)) {
     return TRUE;
@@ -374,16 +365,19 @@ static gboolean context_menu_cb(WebKitWebView *web_view,
     for (int i = webkit_context_menu_get_n_items(context_menu) - 1; i >= 0; --i) {
       WebKitContextMenuItem *item =
           webkit_context_menu_get_item_at_position(context_menu, i);
-          
-    if (item != nullptr) {
-        GAction* action = webkit_context_menu_item_get_gaction(item);
-        if (action != nullptr && g_strcmp0(g_action_get_name(action), "print") == 0) {
+      if (item != nullptr) {
+        GAction *action = webkit_context_menu_item_get_gaction(item);
+        if (action != nullptr &&
+            g_strcmp0(g_action_get_name(action), "print") == 0) {
           webkit_context_menu_remove(context_menu, item);
         }
       }
     }
   }
 
+  // Le menu natif va s'ouvrir (grab du pointeur) : le relâchement synthétique
+  // du clic droit doit être absorbé.
+  linux_texture_bridge_note_context_menu(webview->bridge);
   return FALSE;
 }
 
@@ -901,6 +895,70 @@ void register_app_assets_scheme_once() {
 
 }  // namespace
 
+// -- Recherche de la FlView qui AFFICHE le widget Dart ---------------------
+//
+// `fl_plugin_registrar_get_view` ne renvoie que la vue PRINCIPALE. Une
+// Webview créée depuis une fenêtre secondaire (multi-fenêtres Flutter) devait
+// pourtant être rattachée à SA fenêtre : sinon elle était ajoutée à la fenêtre
+// principale (où elle restait invisible, cachée sous le contenu Flutter).
+// Dart envoie `View.of(context).viewId` (`flutterViewId`) ; on le compare à
+// `fl_view_get_id` de chaque FlView des fenêtres GTK ouvertes.
+//
+// `fl_view_get_id` est résolue à l'exécution (dlsym) : le plugin compile et
+// fonctionne aussi avec un moteur Flutter plus ancien qui ne l'exporte pas
+// (dans ce cas : vue principale uniquement, comme avant).
+namespace {
+
+typedef int64_t (*FlViewGetIdFn)(FlView *);
+
+struct FindViewData {
+  gint64 wanted_id;
+  FlViewGetIdFn get_id;
+  FlView *result;
+};
+
+void find_view_in_widget(GtkWidget *widget, gpointer user_data) {
+  auto *data = static_cast<FindViewData *>(user_data);
+  if (data->result != nullptr) return;
+  if (FL_IS_VIEW(widget)) {
+    if (data->get_id(FL_VIEW(widget)) == data->wanted_id) {
+      data->result = FL_VIEW(widget);
+    }
+    return;
+  }
+  if (GTK_IS_CONTAINER(widget)) {
+    gtk_container_forall(GTK_CONTAINER(widget), find_view_in_widget, data);
+  }
+}
+
+FlView *find_flutter_view(WebviewPlusPlugin *self, gint64 flutter_view_id) {
+  FlView *primary = fl_plugin_registrar_get_view(self->registrar);
+  if (flutter_view_id < 0) return primary;
+
+  static FlViewGetIdFn get_id = reinterpret_cast<FlViewGetIdFn>(
+      dlsym(RTLD_DEFAULT, "fl_view_get_id"));
+  if (get_id == nullptr) return primary;
+  if (primary != nullptr && get_id(primary) == flutter_view_id) return primary;
+
+  FindViewData data = {flutter_view_id, get_id, nullptr};
+  GList *toplevels = gtk_window_list_toplevels();
+  for (GList *l = toplevels; l != nullptr && data.result == nullptr;
+       l = l->next) {
+    find_view_in_widget(GTK_WIDGET(l->data), &data);
+  }
+  g_list_free(toplevels);
+  if (data.result == nullptr) {
+    // Ne JAMAIS retomber sur la vue principale : la Webview serait ajoutée à
+    // la mauvaise fenêtre. `nullptr` => mode texture (indépendant de la vue).
+    g_message("webview_plus: FlView %" G_GINT64_FORMAT
+              " introuvable, repli sur le mode texture.",
+              flutter_view_id);
+  }
+  return data.result;
+}
+
+}  // namespace
+
 LinuxWebview *create_linux_webview(WebviewPlusPlugin *self, gint64 view_id,
                                    FlValue *creation_params) {
   // WebKitGTK 2.42+ : le rendu DMA-BUF / mode compositing GL repose sur de
@@ -910,7 +968,10 @@ LinuxWebview *create_linux_webview(WebviewPlusPlugin *self, gint64 view_id,
   // remplace jamais une valeur déjà définie par l'utilisateur (overwrite=FALSE).
   // Ne concerne que le mode TEXTURE (capture de pixels d'une fenêtre X11
   // cachée). En mode intégré WebKit se dessine normalement (GPU compris).
-  FlView *flutter_view = fl_plugin_registrar_get_view(self->registrar);
+  FlView *flutter_view = find_flutter_view(
+      self, map_lookup_int(creation_params, "flutterViewId", -1));
+  // `flutter_view` peut être nullptr (vue introuvable / mode headless) :
+  // `can_embed` renvoie alors FALSE et on utilise le mode texture.
   const gboolean embedded = linux_texture_bridge_can_embed(flutter_view);
   if (!embedded) {
     g_setenv("WEBKIT_DISABLE_DMABUF_RENDERER", "1", FALSE);
@@ -1271,6 +1332,38 @@ void root_method_call_cb(FlMethodChannel *channel, FlMethodCall *method_call,
     const gint height = static_cast<gint>(map_lookup_double(args, "height", 0) + 0.5);
     linux_texture_bridge_set_rect(webview->bridge, x, y, width, height);
     respond(method_call, success_response());
+    return;
+  }
+
+  if (strcmp(method, "setVisible") == 0) {
+    // Mode intégré : Dart indique si le widget est réellement à l'écran
+    // (faux quand la page est recouverte par une autre route). Une Webview
+    // masquée ne peut plus transparaître sous la page qui la recouvre.
+    linux_texture_bridge_set_visible(
+        webview->bridge, map_lookup_bool(args, "visible", TRUE));
+    respond(method_call, success_response());
+    return;
+  }
+
+  if (strcmp(method, "openDevTools") == 0) {
+    // F12 / Ctrl+Maj+I (capturés côté Dart). Nécessite
+    // `WebviewSettings.isInspectable` ou
+    // `WebviewPlusController.setWebContentsDebuggingEnabled()`.
+    gboolean opened = FALSE;
+    if (webview->web_view != nullptr) {
+      WebKitSettings *settings = webkit_web_view_get_settings(webview->web_view);
+      if (webkit_settings_get_enable_developer_extras(settings)) {
+        webkit_web_inspector_show(webkit_web_view_get_inspector(webview->web_view));
+        opened = TRUE;
+      } else {
+        g_message(
+            "webview_plus: DevTools désactivés. Activez "
+            "WebviewSettings(isInspectable: true) ou "
+            "WebviewPlusController.setWebContentsDebuggingEnabled().");
+      }
+    }
+    g_autoptr(FlValue) value = fl_value_new_bool(opened);
+    respond(method_call, success_response(value));
     return;
   }
 

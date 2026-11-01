@@ -64,6 +64,7 @@ target_include_directories(${PLUGIN_NAME} PRIVATE
 target_link_libraries(${PLUGIN_NAME} PRIVATE flutter)
 target_link_libraries(${PLUGIN_NAME} PRIVATE PkgConfig::GTK)
 target_link_libraries(${PLUGIN_NAME} PRIVATE PkgConfig::WEBKIT)
+target_link_libraries(${PLUGIN_NAME} PRIVATE ${CMAKE_DL_LIBS})
 
 # List of absolute paths to libraries that should be bundled with the plugin.
 # This list could contain prebuilt libraries, or libraries created by an

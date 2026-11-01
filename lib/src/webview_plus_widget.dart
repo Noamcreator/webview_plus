@@ -202,6 +202,16 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
   // l'écran).
   final FocusNode _linuxFocusNode = FocusNode(debugLabel: 'webview_plus_linux');
 
+  // Visibilité de la Webview Linux en mode intégré. Le WebKitWebView natif est
+  // sous la vue Flutter : si la page est recouverte par une autre route, son
+  // « trou » n'est plus peint mais le widget natif resterait affiché et
+  // transparaîtrait dans le trou de la page du dessus. `TickerMode` est
+  // désactivé par Flutter pour les routes recouvertes (hors écran) : on s'en
+  // sert pour masquer/afficher le widget natif.
+  bool _linuxTickerEnabled = true;
+  bool _linuxHasRect = false;
+  bool? _linuxSentVisible;
+
   // `true` dès que la création Windows a été lancée une première fois (voir
   // `didChangeDependencies`, qui a besoin du `Theme` ambiant pour résoudre
   // les couleurs de scrollbar en mode `auto` et ne peut donc pas se faire 
@@ -319,6 +329,9 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
       return true;
     }());
     WidgetsBinding.instance.addObserver(this);
+    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.linux) {
+      HardwareKeyboard.instance.addHandler(_onLinuxHardwareKey);
+    }
     // Filet de sécurité : si aucun événement de premier rendu n'arrive
     // (page très lente, plateforme sans onPageCommitVisible), le rideau
     // est retiré au bout de 4 s pour ne jamais masquer la page.
@@ -352,11 +365,52 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
       }
     } 
     else if (defaultTargetPlatform == TargetPlatform.linux) {
+      // Dépendance à `TickerMode` : ce callback est rappelé quand la page est
+      // recouverte / redevient visible.
+      final bool tickerEnabled = TickerMode.of(context);
+      if (tickerEnabled != _linuxTickerEnabled) {
+        _linuxTickerEnabled = tickerEnabled;
+        _syncLinuxVisibility();
+      }
       if (!_linuxInitScheduled) {
         _linuxInitScheduled = true;
         _initLinuxWebview();
       }
     }
+  }
+
+  /// Envoie au natif la visibilité voulue (mode intégré), sans doublon.
+  void _syncLinuxVisibility() {
+    final viewId = _linuxViewId;
+    if (viewId == null || !_linuxReady || !_linuxEmbedded) return;
+    final bool visible = _linuxTickerEnabled && _linuxHasRect;
+    if (_linuxSentVisible == visible) return;
+    _linuxSentVisible = visible;
+    _globalLinuxChannel.invokeMethod('setVisible', {
+      'viewId': viewId,
+      'visible': visible,
+    }).catchError((_) {});
+  }
+
+  /// F12 / Ctrl+Maj+I : ouvre l'inspecteur WebKit de la Webview visible.
+  /// Géré au niveau global du clavier pour fonctionner même quand la Webview
+  /// n'a pas le focus Flutter. Nécessite `WebviewSettings.isInspectable` ou
+  /// `WebviewPlusController.setWebContentsDebuggingEnabled()`.
+  bool _onLinuxHardwareKey(KeyEvent event) {
+    if (event is! KeyDownEvent) return false;
+    final viewId = _linuxViewId;
+    if (viewId == null || !_linuxReady || !_linuxEmbedded) return false;
+    if (!_linuxTickerEnabled || !_linuxHasRect) return false;
+    final keyboard = HardwareKeyboard.instance;
+    final bool devTools = event.logicalKey == LogicalKeyboardKey.f12 ||
+        (event.logicalKey == LogicalKeyboardKey.keyI &&
+            keyboard.isControlPressed &&
+            keyboard.isShiftPressed);
+    if (!devTools) return false;
+    _globalLinuxChannel
+        .invokeMethod('openDevTools', {'viewId': viewId})
+        .catchError((_) {});
+    return true;
   }
 
   /// Calcule la configuration de thème des barres de défilement à envoyer
@@ -549,11 +603,16 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
       _linuxViewId = id;
       _linuxReady = false;
       _linuxTextureId = null;
+      _linuxHasRect = false;
+      _linuxSentVisible = null;
     });
 
     try {
       final dynamic result = await _globalLinuxChannel.invokeMethod('create', {
         'viewId': id,
+        // Vue Flutter (fenêtre principale ou secondaire) qui affiche ce
+        // widget : le natif y rattache la Webview.
+        'flutterViewId': View.of(context).viewId,
         'initialUrl': widget.initialUrl,
         'initialAsset': widget.initialAsset,
         'initialFile': widget.initialFile,
@@ -610,6 +669,9 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
       'width': rect.width,
       'height': rect.height,
     });
+    // Le trou vient d'être peint : le widget est à l'écran.
+    _linuxHasRect = true;
+    _syncLinuxVisibility();
   }
 
   void _reportLinuxSurfaceSize() {
@@ -1268,6 +1330,9 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.linux) {
+      HardwareKeyboard.instance.removeHandler(_onLinuxHardwareKey);
+    }
     if (_windowsViewId != null) {
       _globalWindowsChannel.invokeMethod('dispose', {'viewId': _windowsViewId});
     }

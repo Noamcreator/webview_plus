@@ -93,9 +93,21 @@ struct _LinuxTextureBridge {
   // aucune taille minimale imposée à la fenêtre (elle peut rétrécir).
   GtkWidget *overlay;   // weak pointer
   GtkWidget *toplevel;  // weak pointer
+  GtkWidget *flview;    // weak pointer
   gulong child_position_handler_id;
   gulong window_state_handler_id;
+  gulong flview_allocate_handler_id;
   GdkRectangle rect;    // pixels logiques, relatif à la FlView
+
+  // Visibilité : la Webview n'est affichée que si Dart la dit visible
+  // (`dart_visible`) ET qu'aucune transition de fenêtre n'est en cours.
+  gboolean dart_visible;
+  gboolean has_rect;
+  guint resync_timeout_id;
+
+  // Menu contextuel natif ouvert par le dernier clic droit : le relâchement
+  // synthétique qui suit doit être absorbé.
+  gboolean swallow_secondary_release;
 
   // Anti-scintillement pendant maximisation / plein écran.
   gboolean suspended;
@@ -375,17 +387,60 @@ gboolean on_overlay_get_child_position(GtkOverlay *, GtkWidget *widget,
   return TRUE;
 }
 
+// Place la Webview juste SOUS la FlView mais AU-DESSUS des autres Webviews :
+// la dernière affichée est celle qui est visible dans le « trou » Dart.
+void raise_below_flview(LinuxTextureBridge *bridge) {
+  if (bridge->overlay == nullptr || bridge->flview == nullptr ||
+      bridge->web_view == nullptr) {
+    return;
+  }
+  GtkOverlay *overlay = GTK_OVERLAY(bridge->overlay);
+  gtk_overlay_reorder_overlay(overlay, GTK_WIDGET(bridge->web_view), -1);
+  gtk_overlay_reorder_overlay(overlay, bridge->flview, -1);
+}
+
+// Affiche / masque réellement le widget GTK selon l'état voulu.
+void apply_visibility(LinuxTextureBridge *bridge) {
+  if (bridge->stopped || bridge->web_view == nullptr) return;
+  GtkWidget *widget = GTK_WIDGET(bridge->web_view);
+  const gboolean want =
+      bridge->dart_visible && bridge->has_rect && !bridge->suspended;
+  if (want == gtk_widget_get_visible(widget)) return;
+  if (want) {
+    raise_below_flview(bridge);
+    gtk_widget_show(widget);
+    gtk_widget_queue_resize(widget);
+    if (bridge->overlay != nullptr) gtk_widget_queue_draw(bridge->overlay);
+  } else {
+    gtk_widget_hide(widget);
+  }
+}
+
 gboolean on_resume_timeout(gpointer user_data) {
   auto *bridge = static_cast<LinuxTextureBridge *>(user_data);
   bridge->resume_timeout_id = 0;
   if (bridge->stopped || !bridge->suspended) return G_SOURCE_REMOVE;
   bridge->suspended = FALSE;
-  if (bridge->web_view != nullptr) {
-    gtk_widget_show(GTK_WIDGET(bridge->web_view));
-    gtk_widget_queue_draw(GTK_WIDGET(bridge->web_view));
-  }
-  if (bridge->overlay != nullptr) gtk_widget_queue_draw(bridge->overlay);
+  apply_visibility(bridge);
   return G_SOURCE_REMOVE;
+}
+
+// Après un redimensionnement de la FlView (fenêtre agrandie, plein écran...),
+// force GTK à recalculer la taille de la Webview (anti « ancienne taille »).
+gboolean on_resync_timeout(gpointer user_data) {
+  auto *bridge = static_cast<LinuxTextureBridge *>(user_data);
+  bridge->resync_timeout_id = 0;
+  if (bridge->stopped || bridge->web_view == nullptr) return G_SOURCE_REMOVE;
+  gtk_widget_queue_resize(GTK_WIDGET(bridge->web_view));
+  if (bridge->overlay != nullptr) gtk_widget_queue_allocate(bridge->overlay);
+  return G_SOURCE_REMOVE;
+}
+
+void on_flview_size_allocate(GtkWidget *, GdkRectangle *, gpointer user_data) {
+  auto *bridge = static_cast<LinuxTextureBridge *>(user_data);
+  if (bridge->stopped) return;
+  if (bridge->resync_timeout_id != 0) g_source_remove(bridge->resync_timeout_id);
+  bridge->resync_timeout_id = g_timeout_add(100, on_resync_timeout, bridge);
 }
 
 // (Ré)arme le réaffichage : on attend `kResumeQuietMs` sans nouvelle activité
@@ -407,7 +462,7 @@ void suspend_webview(LinuxTextureBridge *bridge) {
   if (!bridge->suspended) {
     bridge->suspended = TRUE;
     bridge->suspend_start_us = g_get_monotonic_time();
-    gtk_widget_hide(GTK_WIDGET(bridge->web_view));
+    apply_visibility(bridge);
   }
   arm_resume(bridge);
 }
@@ -442,7 +497,16 @@ LinuxTextureBridge *linux_texture_bridge_new_embedded(WebKitWebView *web_view,
   gtk_widget_set_halign(GTK_WIDGET(web_view), GTK_ALIGN_START);
   gtk_widget_set_valign(GTK_WIDGET(web_view), GTK_ALIGN_START);
   gtk_overlay_add_overlay(GTK_OVERLAY(overlay), GTK_WIDGET(web_view));
-  gtk_overlay_reorder_overlay(GTK_OVERLAY(overlay), GTK_WIDGET(web_view), 0);
+  // Jamais de vrai focus GTK sur la Webview : WebKit le prend sinon au clic
+  // (`gtk_widget_grab_focus`) et la FlView ne reçoit plus le clavier. Le focus
+  // WebKit (caret, sélection active) est signalé par un focus-in synthétique.
+  gtk_widget_set_can_focus(GTK_WIDGET(web_view), FALSE);
+
+  bridge->flview = GTK_WIDGET(view);
+  g_object_add_weak_pointer(G_OBJECT(view),
+                            reinterpret_cast<gpointer *>(&bridge->flview));
+  bridge->flview_allocate_handler_id = g_signal_connect(
+      view, "size-allocate", G_CALLBACK(on_flview_size_allocate), bridge);
 
   bridge->overlay = overlay;
   g_object_add_weak_pointer(G_OBJECT(overlay),
@@ -461,7 +525,11 @@ LinuxTextureBridge *linux_texture_bridge_new_embedded(WebKitWebView *web_view,
         G_CALLBACK(on_toplevel_window_state), bridge);
   }
 
-  gtk_widget_show(GTK_WIDGET(web_view));
+  // Masquée jusqu'au premier `setRect` + `setVisible(true)` de Dart : évite un
+  // flash 1x1 en haut à gauche et un premier layout de la page à la mauvaise
+  // taille. La position finale (au-dessus des autres Webviews) est posée à
+  // l'affichage, voir `apply_visibility`.
+  gtk_widget_hide(GTK_WIDGET(web_view));
   return bridge;
 }
 
@@ -480,6 +548,7 @@ void linux_texture_bridge_set_rect(LinuxTextureBridge *bridge, int x, int y,
                        rect.width != bridge->rect.width ||
                        rect.height != bridge->rect.height;
   bridge->rect = rect;
+  bridge->has_rect = TRUE;
   // Pendant une transition de fenêtre, chaque nouveau rectangle prolonge le
   // masquage jusqu'à stabilisation.
   if (bridge->suspended) arm_resume(bridge);
@@ -492,6 +561,18 @@ void linux_texture_bridge_set_rect(LinuxTextureBridge *bridge, int x, int y,
     gtk_widget_set_size_request(GTK_WIDGET(bridge->web_view), width, height);
     if (bridge->overlay != nullptr) gtk_widget_queue_allocate(bridge->overlay);
   }
+  apply_visibility(bridge);
+}
+
+void linux_texture_bridge_set_visible(LinuxTextureBridge *bridge,
+                                      gboolean visible) {
+  if (bridge == nullptr || !bridge->embedded || bridge->stopped) return;
+  bridge->dart_visible = visible;
+  apply_visibility(bridge);
+}
+
+void linux_texture_bridge_note_context_menu(LinuxTextureBridge *bridge) {
+  if (bridge != nullptr) bridge->swallow_secondary_release = TRUE;
 }
 
 int64_t linux_texture_bridge_start(LinuxTextureBridge *bridge) {
@@ -648,13 +729,34 @@ void linux_texture_bridge_dispatch_pointer(LinuxTextureBridge *bridge,
     event->button.state = is_press
         ? bridge->pressed_buttons_mask
         : (bridge->pressed_buttons_mask | button_mask);
-    gtk_main_do_event(event);
+    // Le menu contextuel natif (ouvert par le press du clic droit) prend le
+    // grab : lui envoyer le release synthétique pourrait activer un élément.
+    const gboolean swallow = !is_press && gdk_button == 3 &&
+                             bridge->embedded &&
+                             bridge->swallow_secondary_release;
+    if (!is_press && gdk_button == 3) bridge->swallow_secondary_release = FALSE;
+    if (!swallow) gtk_main_do_event(event);
     gdk_event_free(event);
 
     if (is_press) {
       bridge->pressed_buttons_mask |= button_mask;
     } else {
       bridge->pressed_buttons_mask &= ~button_mask;
+    }
+
+    // Filet de sécurité clavier : si WebKit a malgré tout pris le focus GTK,
+    // on le rend à la FlView (sinon Flutter ne reçoit plus aucune touche),
+    // puis on re-signale à WebKit qu'il est actif.
+    if (is_press && bridge->embedded && bridge->flview != nullptr &&
+        bridge->toplevel != nullptr && GTK_IS_WINDOW(bridge->toplevel)) {
+      GtkWidget *focused = gtk_window_get_focus(GTK_WINDOW(bridge->toplevel));
+      if (focused != nullptr &&
+          (focused == GTK_WIDGET(bridge->web_view) ||
+           gtk_widget_is_ancestor(focused, GTK_WIDGET(bridge->web_view)))) {
+        gtk_widget_grab_focus(bridge->flview);
+        bridge->focus_sent = FALSE;
+        ensure_bridge_focus(bridge);
+      }
     }
   } else if (type == GDK_SCROLL) {
     GdkEvent *event = gdk_event_new(GDK_SCROLL);
@@ -738,6 +840,21 @@ void linux_texture_bridge_stop(LinuxTextureBridge *bridge) {
     bridge->toplevel = nullptr;
   }
   bridge->window_state_handler_id = 0;
+  if (bridge->resync_timeout_id != 0) {
+    g_source_remove(bridge->resync_timeout_id);
+    bridge->resync_timeout_id = 0;
+  }
+  if (bridge->flview != nullptr) {
+    if (bridge->flview_allocate_handler_id != 0) {
+      g_signal_handler_disconnect(bridge->flview,
+                                  bridge->flview_allocate_handler_id);
+    }
+    g_object_remove_weak_pointer(
+        G_OBJECT(bridge->flview),
+        reinterpret_cast<gpointer *>(&bridge->flview));
+    bridge->flview = nullptr;
+  }
+  bridge->flview_allocate_handler_id = 0;
   if (bridge->capture_timeout_id != 0) {
     g_source_remove(bridge->capture_timeout_id);
     bridge->capture_timeout_id = 0;
