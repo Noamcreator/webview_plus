@@ -173,6 +173,63 @@ static void dom_content_loaded_message_cb(WebKitUserContentManager *manager,
   invoke_method(webview, "onDOMContentLoaded", args);
 }
 
+// Un champ éditable (input/textarea/contenteditable) prend / perd le focus
+// dans la page : la Webview reçoit / rend le vrai focus clavier GTK.
+static void editable_focus_message_cb(WebKitUserContentManager *manager,
+                                      WebKitJavascriptResult *js_result,
+                                      gpointer user_data) {
+  LinuxWebview *webview = static_cast<LinuxWebview *>(user_data);
+  if (webview->disposed || webview->bridge == nullptr) return;
+  JSCValue *value = webkit_javascript_result_get_js_value(js_result);
+  linux_texture_bridge_set_text_focus(webview->bridge,
+                                      jsc_value_to_boolean(value));
+}
+
+// Inspecteur : toujours détaché (fenêtre à part). Attaché, il vivrait DANS la
+// Webview, sous la FlView : les événements souris/clavier réels n'y
+// arriveraient jamais (ils sont interceptés par la FlView puis redirigés
+// vers la page uniquement) -> console visible mais inutilisable.
+static gboolean inspector_attach_cb(WebKitWebInspector *, gpointer) {
+  return TRUE;  // gère le signal : l'inspecteur n'est PAS attaché
+}
+
+static gboolean open_inspector(LinuxWebview *webview) {
+  if (webview->web_view == nullptr) return FALSE;
+  WebKitSettings *settings = webkit_web_view_get_settings(webview->web_view);
+  if (!webkit_settings_get_enable_developer_extras(settings)) {
+    g_message(
+        "webview_plus: DevTools désactivés. Activez "
+        "WebviewSettings(isInspectable: true) ou "
+        "WebviewPlusController.setWebContentsDebuggingEnabled().");
+    return FALSE;
+  }
+  WebKitWebInspector *inspector = webkit_web_view_get_inspector(webview->web_view);
+  if (g_object_get_data(G_OBJECT(inspector), "webview-plus-detached") == nullptr) {
+    g_object_set_data(G_OBJECT(inspector), "webview-plus-detached",
+                      GINT_TO_POINTER(1));
+    g_signal_connect(inspector, "attach", G_CALLBACK(inspector_attach_cb), nullptr);
+  }
+  if (webkit_web_inspector_is_attached(inspector)) {
+    webkit_web_inspector_detach(inspector);
+  }
+  webkit_web_inspector_show(inspector);
+  return TRUE;
+}
+
+// F12 / Ctrl+Maj+I quand la Webview a le vrai focus clavier (saisie de texte).
+static gboolean web_view_key_press_cb(GtkWidget *, GdkEventKey *event,
+                                      gpointer user_data) {
+  LinuxWebview *webview = static_cast<LinuxWebview *>(user_data);
+  const gboolean ctrl_shift_i =
+      (event->state & GDK_CONTROL_MASK) && (event->state & GDK_SHIFT_MASK) &&
+      (event->keyval == GDK_KEY_I || event->keyval == GDK_KEY_i);
+  if (event->keyval == GDK_KEY_F12 || ctrl_shift_i) {
+    open_inspector(webview);
+    return TRUE;
+  }
+  return FALSE;
+}
+
 // -- Navigation -------------------------------------------------------
 
 static void navigation_request_finished_cb(GObject *object,
@@ -972,6 +1029,10 @@ LinuxWebview *create_linux_webview(WebviewPlusPlugin *self, gint64 view_id,
       self, map_lookup_int(creation_params, "flutterViewId", -1));
   // `flutter_view` peut être nullptr (vue introuvable / mode headless) :
   // `can_embed` renvoie alors FALSE et on utilise le mode texture.
+  // Le plugin NE réorganise JAMAIS la hiérarchie GTK d'une FlView existante
+  // (voir 0.8.2 : cela corrompait le contexte OpenGL du moteur). Chaque
+  // fenêtre, principale comme secondaire, doit être créée avec son GtkOverlay
+  // dès le départ : voir `my_application.cc` (FlApplication::create_window).
   const gboolean embedded = linux_texture_bridge_can_embed(flutter_view);
   if (!embedded) {
     g_setenv("WEBKIT_DISABLE_DMABUF_RENDERER", "1", FALSE);
@@ -1169,6 +1230,37 @@ LinuxWebview *create_linux_webview(WebviewPlusPlugin *self, gint64 view_id,
                    "script-message-received::WebviewPlusDomContentLoaded",
                    G_CALLBACK(dom_content_loaded_message_cb), webview);
 
+  if (webview->embedded) {
+    // Détecte le focus d'un champ éditable (toutes les frames) et le signale
+    // au natif (`WebviewPlusEditable`) pour donner le vrai focus GTK.
+    static const gchar *kEditableFocusScript =
+        "(function(){if(window.__wpEditableHook)return;window.__wpEditableHook=true;"
+        "function ed(e){if(!e)return false;var t=(e.tagName||'').toUpperCase();"
+        "if(t==='TEXTAREA')return true;"
+        "if(t==='INPUT'){var y=(e.type||'text').toLowerCase();"
+        "return ['button','checkbox','radio','submit','reset','image','file','range','color','hidden'].indexOf(y)<0;}"
+        "return !!e.isContentEditable;}"
+        "var last=null;"
+        "function rep(){var v=ed(document.activeElement);if(v===last)return;last=v;"
+        "try{window.webkit.messageHandlers.WebviewPlusEditable.postMessage(v);}catch(_){}}"
+        "document.addEventListener('focusin',rep,true);"
+        "document.addEventListener('focusout',function(){setTimeout(rep,0);},true);"
+        "})();";
+    WebKitUserScript *editable_script = webkit_user_script_new(
+        kEditableFocusScript, WEBKIT_USER_CONTENT_INJECT_ALL_FRAMES,
+        WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_START, nullptr, nullptr);
+    webkit_user_content_manager_add_script(webview->content_manager,
+                                            editable_script);
+    webkit_user_script_unref(editable_script);
+    webkit_user_content_manager_register_script_message_handler(
+        webview->content_manager, "WebviewPlusEditable");
+    g_signal_connect(webview->content_manager,
+                     "script-message-received::WebviewPlusEditable",
+                     G_CALLBACK(editable_focus_message_cb), webview);
+    g_signal_connect(webview->web_view, "key-press-event",
+                     G_CALLBACK(web_view_key_press_cb), webview);
+  }
+
   g_signal_connect(webview->web_view, "decide-policy",
                    G_CALLBACK(decide_policy_cb), webview);
   g_signal_connect(webview->web_view, "load-changed",
@@ -1196,8 +1288,10 @@ LinuxWebview *create_linux_webview(WebviewPlusPlugin *self, gint64 view_id,
   } else {
     g_message(
         "webview_plus: mode texture (lent et instable sur les moteurs "
-        "Flutter récents). Voir la section Linux du README pour le mode "
-        "intégré (GtkOverlay dans my_application.cc).");
+        "Flutter récents) car cette fenêtre n'a pas de GtkOverlay. Créez "
+        "TOUTES les fenêtres (principale et secondaires) via "
+        "FlApplication::create_window, voir "
+        "example/linux/runner/my_application.cc.");
     webview->bridge = linux_texture_bridge_new(
         fl_plugin_registrar_get_texture_registrar(self->registrar),
         webview->web_view);
@@ -1349,21 +1443,25 @@ void root_method_call_cb(FlMethodChannel *channel, FlMethodCall *method_call,
     // F12 / Ctrl+Maj+I (capturés côté Dart). Nécessite
     // `WebviewSettings.isInspectable` ou
     // `WebviewPlusController.setWebContentsDebuggingEnabled()`.
-    gboolean opened = FALSE;
-    if (webview->web_view != nullptr) {
-      WebKitSettings *settings = webkit_web_view_get_settings(webview->web_view);
-      if (webkit_settings_get_enable_developer_extras(settings)) {
-        webkit_web_inspector_show(webkit_web_view_get_inspector(webview->web_view));
-        opened = TRUE;
-      } else {
-        g_message(
-            "webview_plus: DevTools désactivés. Activez "
-            "WebviewSettings(isInspectable: true) ou "
-            "WebviewPlusController.setWebContentsDebuggingEnabled().");
+    g_autoptr(FlValue) value = fl_value_new_bool(open_inspector(webview));
+    respond(method_call, success_response(value));
+    return;
+  }
+
+  if (strcmp(method, "blurFocus") == 0) {
+    // Clic dans Flutter en dehors de la Webview : le clavier retourne à la
+    // FlView et l'éventuel champ de la page perd le focus.
+    if (linux_texture_bridge_has_text_focus(webview->bridge)) {
+      linux_texture_bridge_set_text_focus(webview->bridge, FALSE);
+      if (webview->web_view != nullptr) {
+        webkit_web_view_evaluate_javascript(
+            webview->web_view,
+            "if(document.activeElement&&document.activeElement.blur)"
+            "document.activeElement.blur();",
+            -1, nullptr, nullptr, nullptr, nullptr, nullptr);
       }
     }
-    g_autoptr(FlValue) value = fl_value_new_bool(opened);
-    respond(method_call, success_response(value));
+    respond(method_call, success_response());
     return;
   }
 

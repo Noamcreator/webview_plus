@@ -211,6 +211,8 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
   bool _linuxTickerEnabled = true;
   bool _linuxHasRect = false;
   bool? _linuxSentVisible;
+  Rect? _linuxLastRect;
+  int? _linuxFlutterViewId;
 
   // `true` dès que la création Windows a été lancée une première fois (voir
   // `didChangeDependencies`, qui a besoin du `Theme` ambiant pour résoudre
@@ -331,6 +333,8 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
     WidgetsBinding.instance.addObserver(this);
     if (!kIsWeb && defaultTargetPlatform == TargetPlatform.linux) {
       HardwareKeyboard.instance.addHandler(_onLinuxHardwareKey);
+      GestureBinding.instance.pointerRouter
+          .addGlobalRoute(_onLinuxGlobalPointer);
     }
     // Filet de sécurité : si aucun événement de premier rendu n'arrive
     // (page très lente, plateforme sans onPageCommitVisible), le rideau
@@ -367,7 +371,7 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
     else if (defaultTargetPlatform == TargetPlatform.linux) {
       // Dépendance à `TickerMode` : ce callback est rappelé quand la page est
       // recouverte / redevient visible.
-      final bool tickerEnabled = TickerMode.of(context);
+      final bool tickerEnabled = TickerMode.valuesOf(context).enabled;
       if (tickerEnabled != _linuxTickerEnabled) {
         _linuxTickerEnabled = tickerEnabled;
         _syncLinuxVisibility();
@@ -390,6 +394,24 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
       'viewId': viewId,
       'visible': visible,
     }).catchError((_) {});
+  }
+
+  /// Clic dans Flutter en dehors de la Webview : le clavier doit retourner à
+  /// Flutter. Pendant la saisie dans un champ de la page, la Webview détient le
+  /// vrai focus clavier GTK ; sans ça, les TextField Flutter ne recevraient
+  /// plus rien.
+  void _onLinuxGlobalPointer(PointerEvent event) {
+    if (event is! PointerDownEvent) return;
+    final viewId = _linuxViewId;
+    final rect = _linuxLastRect;
+    if (viewId == null || rect == null || !_linuxReady || !_linuxEmbedded) {
+      return;
+    }
+    if (event.viewId != _linuxFlutterViewId) return;
+    if (rect.contains(event.position)) return;
+    _globalLinuxChannel
+        .invokeMethod('blurFocus', {'viewId': viewId})
+        .catchError((_) {});
   }
 
   /// F12 / Ctrl+Maj+I : ouvre l'inspecteur WebKit de la Webview visible.
@@ -612,7 +634,7 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
         'viewId': id,
         // Vue Flutter (fenêtre principale ou secondaire) qui affiche ce
         // widget : le natif y rattache la Webview.
-        'flutterViewId': View.of(context).viewId,
+        'flutterViewId': _linuxFlutterViewId = View.of(context).viewId,
         'initialUrl': widget.initialUrl,
         'initialAsset': widget.initialAsset,
         'initialFile': widget.initialFile,
@@ -662,6 +684,7 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
   void _reportLinuxEmbeddedRect(Rect rect) {
     final viewId = _linuxViewId;
     if (viewId == null || !_linuxReady || !_linuxEmbedded) return;
+    _linuxLastRect = rect;
     _globalLinuxChannel.invokeMethod('setRect', {
       'viewId': viewId,
       'x': rect.left,
@@ -1332,6 +1355,8 @@ class _WebviewWidgetState extends State<WebviewWidget> with WidgetsBindingObserv
     WidgetsBinding.instance.removeObserver(this);
     if (!kIsWeb && defaultTargetPlatform == TargetPlatform.linux) {
       HardwareKeyboard.instance.removeHandler(_onLinuxHardwareKey);
+      GestureBinding.instance.pointerRouter
+          .removeGlobalRoute(_onLinuxGlobalPointer);
     }
     if (_windowsViewId != null) {
       _globalWindowsChannel.invokeMethod('dispose', {'viewId': _windowsViewId});

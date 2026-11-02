@@ -1,72 +1,79 @@
+## 0.9.5
+Linux: secondary windows, text input, DevTools, notes bug
+- **Secondary windows: the runner must create every window through `FlApplication::create_window`.** In 0.9.4 a secondary window (Flutter multi-window API) had no `GtkOverlay`, so the plugin fell back to texture mode, which floods the console with `glGetError 501` (an engine bug in `FlPixelBufferTexture`) and can crash the app on first open. The plugin deliberately does NOT re-parent an existing `FlView` at runtime: that is what corrupted the engine's OpenGL context in 0.8.2. Instead, `example/linux/runner/my_application.cc` (+ `.h`) now derives from `FlApplication` and builds the `GtkWindow` + `GtkOverlay` + transparent `FlView` structure inside `create_window`, before the view is realized. The engine calls it for the main window AND for every secondary window, so both get the native, smooth embedded mode. Requires a Flutter SDK that ships `fl_application.h` (current stable/beta).
+- Typing text in a page was impossible since 0.9.4: the webview was made non-focusable to protect the Flutter keyboard, and the synthesized key events never reached WebKit's input method. Now, when an editable element of the page gets focus (`input`, `textarea`, `contenteditable`, detected by an injected script that posts `WebviewPlusEditable`), the webview receives the REAL GTK keyboard focus (IME, dead keys, AltGr...). The focus goes back to the `FlView` as soon as the field loses focus, the page is covered by another route, or the user clicks anywhere else in Flutter (new `blurFocus` message, driven by a global pointer route on the Dart side). Flutter text fields keep working as in 0.9.4.
+- DevTools window was displayed but impossible to use: the inspector opened "attached" inside the webview, underneath the `FlView`, so no real mouse/keyboard event could reach it. It is now always detached (its own window). F12 / Ctrl+Shift+I also work when the webview owns the keyboard focus.
+- `evaluateJavascript` threw `PlatformException(javascript_error, Unsupported result type)` when the script returned a value that cannot be serialized (DOM node, Promise, function...), e.g. `updateAllNotesUI(...)` after writing a note. The script has run anyway, so the result is now `null`, like on Android/iOS.
+
 ## 0.9.4
-# Linux : fenêtres secondaires, empilement des pages, clavier, DevTools, menu contextuel
-- Fenêtre secondaire (multi-fenêtres Flutter) : la Webview était toujours rattachée à la FlView PRINCIPALE, donc invisible dans la fenêtre secondaire. Dart envoie maintenant `View.of(context).viewId` (`flutterViewId`) et le natif retrouve la bonne FlView (`fl_view_get_id`, résolu par `dlsym` : compatible avec les moteurs plus anciens). Une FlView qui n'est pas un enfant overlay (fenêtre secondaire créée par le moteur) utilise le mode texture ; une vue introuvable ne retombe plus sur la fenêtre principale.
-- Webviews empilées : en mode intégré, une page recouverte par une autre route gardait sa Webview native affichée, qui transparaissait dans le trou de la page du dessus. La Webview est maintenant masquée quand son widget n'est plus à l'écran (`TickerMode` désactivé par Flutter sur les routes recouvertes, message `setVisible`), et à l'affichage elle est remontée au-dessus des autres Webviews (mais sous la FlView). Elle reste cachée jusqu'au premier `setRect` (plus de flash 1x1).
-- Clavier Flutter perdu après un clic sur une Webview : WebKit prenait le focus GTK de la FlView. La Webview intégrée n'est plus focusable côté GTK (le focus WebKit reste signalé par un focus-in synthétique) + filet de sécurité qui rend le focus à la FlView.
-- F12 / Ctrl+Maj+I ouvrent l'inspecteur WebKit (message `openDevTools`). Nécessite `WebviewSettings(isInspectable: true)` ou `WebviewPlusController.setWebContentsDebuggingEnabled()`.
-- Menu contextuel natif WebKit rétabli en mode intégré (il s'affichait au mauvais endroit uniquement en mode texture) ; il respecte `disableContextMenu`, `disableLongPressContextMenuOnLinks` et `disablePrinting`. « Inspect Element » apparaît quand les DevTools sont activés. `ContextMenuItem` personnalisés : toujours réservés à Android/iOS.
-- Plein écran / maximisation : en plus du masquage temporaire (0.9.4), un redimensionnement de la FlView force GTK à recalculer la taille de la Webview (anti « ancienne taille »).
+Linux: secondary windows, page stacking, keyboard, DevTools, context menu
+- Secondary window (Flutter multi-window): the Webview was always attached to the PRIMARY `FlView`, so it was invisible in the secondary window. Dart now sends `View.of(context).viewId` (`flutterViewId`) and the native side finds the right `FlView` (`fl_view_get_id`, resolved with `dlsym`: compatible with older engines). A `FlView` that is not an overlay child (secondary window created by the engine) uses texture mode; an unknown view no longer falls back to the main window.
+- Stacked Webviews: in embedded mode, a page covered by another route kept its native Webview displayed, and it showed through the hole of the page on top. The Webview is now hidden when its widget is no longer on screen (`TickerMode` is disabled by Flutter on covered routes, `setVisible` message), and when shown again it is raised above the other Webviews (but below the `FlView`). It stays hidden until the first `setRect` (no more 1x1 flash).
+- Flutter keyboard lost after clicking a Webview: WebKit took the GTK focus away from the `FlView`. The embedded Webview is no longer focusable on the GTK side (WebKit focus is still signaled with a synthetic focus-in) + a safety net that gives the focus back to the `FlView`.
+- F12 / Ctrl+Shift+I open the WebKit inspector (`openDevTools` message). Requires `WebviewSettings(isInspectable: true)` or `WebviewPlusController.setWebContentsDebuggingEnabled()`.
+- Native WebKit context menu restored in embedded mode (it only appeared at the wrong place in texture mode); it honors `disableContextMenu`, `disableLongPressContextMenuOnLinks` and `disablePrinting`. "Inspect Element" appears when DevTools are enabled. Custom `ContextMenuItem`s: still Android/iOS only.
+- Fullscreen / maximize: in addition to the temporary hiding (0.9.3), resizing the `FlView` forces GTK to recompute the Webview size (anti "old size").
 
 ## 0.9.3
-# Linux (mode intégré) : trois correctifs
-- Redimensionnement : la fenêtre pouvait grandir mais plus rétrécir. Le WebKitWebView était un enfant de `GtkFixed` avec `set_size_request`, ce qui imposait sa taille comme taille minimale de toute la fenêtre. Il est maintenant un enfant `GtkOverlay` (sous la FlView) positionné via le signal `get-child-position` ; GtkOverlay ignore ses enfants overlay dans sa taille minimale. Le `my_application.cc` existant (FlView overlay + enfant principal `GtkFixed`) reste compatible ; l'enfant principal peut être n'importe quel widget.
-- Molette trop rapide : Flutter envoie des pixels (53 par cran) alors que GTK attend des crans. Les deltas sont divisés par 53 avant d'être envoyés à WebKit. Réglage optionnel : variable d'environnement `WEBVIEW_PLUS_SCROLL_SPEED` (ex. `0.7` plus lent, `1.5` plus rapide).
-- Plein écran / maximisation (double-clic barre de titre) : double rendu et clignotement, car la Webview gardait l'ancien rectangle 1-2 frames pendant que Flutter avait déjà percé le trou à la nouvelle taille. La Webview est masquée pendant le changement d'état (maximisé/plein écran/tiled) puis réaffichée dès que `setRect` s'est stabilisé (150 ms sans changement, 1 s max).
-- `example/linux/runner/my_application.cc` : mis à jour avec le GtkOverlay + fond transparent (l'ancien exemple était le runner Flutter standard, donc en mode texture).
+Linux (embedded mode): three fixes
+- Resizing: the window could grow but no longer shrink. The `WebKitWebView` was a `GtkFixed` child with `set_size_request`, which imposed its size as the minimum size of the whole window. It is now a `GtkOverlay` child (below the `FlView`) positioned through the `get-child-position` signal; `GtkOverlay` ignores its overlay children in its minimum size. The existing `my_application.cc` (`FlView` overlay + `GtkFixed` main child) stays compatible; the main child can be any widget.
+- Mouse wheel too fast: Flutter sends pixels (53 per notch) while GTK expects notches. Deltas are now divided by 53 before being sent to WebKit. Optional tuning: `WEBVIEW_PLUS_SCROLL_SPEED` environment variable (e.g. `0.7` slower, `1.5` faster).
+- Fullscreen / maximize (double-click on the title bar): double rendering and flickering, because the Webview kept its old rectangle for 1-2 frames while Flutter had already punched the hole at the new size. The Webview is hidden during the state change (maximized/fullscreen/tiled) and shown again once `setRect` has settled (150 ms without change, 1 s max).
+- `example/linux/runner/my_application.cc`: updated with the `GtkOverlay` + transparent background (the old example was the standard Flutter runner, i.e. texture mode).
 
 ## 0.9.2
-- Android : les événements d'une Webview préchargée ne sont plus rejoués dès la création du widget Dart mais seulement une fois la vue dimensionnée (largeur/hauteur > 0). Sinon un script d'initialisation qui fige sa mise en page sur `window.innerWidth/innerHeight` (ex. `initFromFlutter`) s'exécutait à 0x0 : page invisible, seul le reste de l'écran s'affichait.
-- Android : une page préchargée est rechargée 1 s (au lieu de 1,5 s) après son adoption.
+- Android: events of a preloaded Webview are no longer replayed as soon as the Dart widget is created but only once the view has been laid out (width/height > 0). Otherwise an init script that freezes its layout on `window.innerWidth/innerHeight` (e.g. `initFromFlutter`) ran at 0x0: invisible page, only the rest of the screen was displayed.
+- Android: a preloaded page is reloaded 1 s (instead of 1.5 s) after it has been adopted.
 
 ## 0.9.1
 
-- Nouveau `controller.requestFocus()` (toutes plateformes) : donne le focus clavier à la Webview, ex. depuis un handler JS `requestWebViewFocus`. Android `requestFocus()`, macOS first responder, Linux/Windows focus Flutter du widget (+ focus-in WebKit sur Linux), Web `iframe.focus()`.
+- New `controller.requestFocus()` (all platforms): gives the keyboard focus to the Webview, e.g. from a `requestWebViewFocus` JS handler. Android `requestFocus()`, macOS first responder, Linux/Windows Flutter focus of the widget (+ WebKit focus-in on Linux), Web `iframe.focus()`.
 
 ## 0.9.0
-# Linux : nouveau mode « intégré » (remplace la texture par défaut)
-- Cause du `glGetError 501` et des plantages aléatoires : `FlPixelBufferTexture` fait un `glBindTexture` sur une texture créée dans un autre contexte GL (défaut du moteur Flutter récent, non corrigeable depuis un plugin). En plus, chaque frame passait par capture X11 -> copie -> envoi complet au GPU, d'où la lenteur.
-- Mode intégré : le `WebKitWebView` est un vrai widget GTK placé SOUS la vue Flutter (fond transparent) ; le widget Dart perce un trou (`BlendMode.clear`) et signale son rectangle (`setRect`). WebKit se dessine nativement (fluide, GPU), fonctionne sous Wayland, et les widgets Flutter (dialogs, barres, spinner, rideau de couleur) restent au-dessus.
-- Nécessite le `my_application.cc` fourni (FlView dans un `GtkOverlay` au-dessus d'un `GtkFixed`). Sans lui : repli automatique sur le mode texture. Forçage du repli : `WEBVIEW_PLUS_LINUX_MODE=texture`.
+Linux: new "embedded" mode (replaces the texture by default)
+- Cause of `glGetError 501` and random crashes: `FlPixelBufferTexture` does a `glBindTexture` on a texture created in another GL context (a defect of the recent Flutter engine, not fixable from a plugin). In addition, every frame went through X11 capture -> copy -> full upload to the GPU, hence the slowness.
+- Embedded mode: the `WebKitWebView` is a real GTK widget placed BELOW the Flutter view (transparent background); the Dart widget punches a hole (`BlendMode.clear`) and reports its rectangle (`setRect`). WebKit draws natively (smooth, GPU), it works on Wayland, and Flutter widgets (dialogs, bars, spinner, color curtain) stay on top.
+- Requires the provided `my_application.cc` (`FlView` in a `GtkOverlay` above a `GtkFixed`). Without it: automatic fallback to texture mode. Force the fallback with `WEBVIEW_PLUS_LINUX_MODE=texture`.
 
 ## 0.8.9
 
-# Nouveaux callbacks (`WebviewWidget`)
-- `onLoadError(controller, Uri url, int code, String message)` : échec de chargement du document principal (aussi statut HTTP >= 400 sur Android/macOS). `onReceivedError` continue de fonctionner (même événement).
-- `onContentLoading` : navigation validée, le document commence à recevoir son contenu (Android `doUpdateVisitedHistory`, macOS `didCommit`, Linux `COMMITTED`, Web).
-- `onPageCommitVisible` : premier contenu prêt à être peint (Android natif ; macOS/Linux/Web : deux `requestAnimationFrame` après le démarrage du document).
-- `onProgressChanged(controller, int 0..100)` : Android `WebChromeClient`, macOS `estimatedProgress`, Linux `estimated-load-progress`, Web synthétique (10 -> 100).
-- `onLoadResource` fonctionne maintenant pour de bon : côté macOS le natif n'envoyait JAMAIS rien à Dart (simple commentaire dans le code). Implémenté sur Android (`shouldInterceptRequest`, `file://`), macOS et Linux (schéma `app-assets://`). Seules les extensions de `WebviewSettings.interceptedResourceExtensions` (images par défaut) sont transmises, et seulement si le callback est fourni. Windows : contrat Dart identique, natif à implémenter ; Web : impossible avec une iframe.
+New callbacks (`WebviewWidget`)
+- `onLoadError(controller, Uri url, int code, String message)`: failure to load the main document (also HTTP status >= 400 on Android/macOS). `onReceivedError` keeps working (same event).
+- `onContentLoading`: navigation committed, the document starts receiving its content (Android `doUpdateVisitedHistory`, macOS `didCommit`, Linux `COMMITTED`, Web).
+- `onPageCommitVisible`: first content ready to be painted (native on Android; macOS/Linux/Web: two `requestAnimationFrame` after the document starts).
+- `onProgressChanged(controller, int 0..100)`: Android `WebChromeClient`, macOS `estimatedProgress`, Linux `estimated-load-progress`, synthetic on Web (10 -> 100).
+- `onLoadResource` now really works: on macOS the native side NEVER sent anything to Dart (it was just a comment in the code). Implemented on Android (`shouldInterceptRequest`, `file://`), macOS and Linux (`app-assets://` scheme). Only the extensions listed in `WebviewSettings.interceptedResourceExtensions` (images by default) are forwarded, and only if the callback is provided. Windows: identical Dart contract, native side still to implement; Web: impossible with an iframe.
 
-# Couleur de départ (fini le flash blanc / noir)
-- Android n'appliquait pas `initialBackgroundColor` : la Webview restait blanche jusqu'au premier rendu. Appliqué (`setBackgroundColor`), ainsi que macOS `underPageBackgroundColor`.
-- Nouveau `WebviewSettings.coverUntilFirstPaint` (vrai par défaut) : un rideau Flutter de la couleur `initialBackgroundColor` recouvre la vue native jusqu'au premier rendu, puis fond en 150 ms.
+Start color (no more white / black flash)
+- Android did not apply `initialBackgroundColor`: the Webview stayed white until the first render. Now applied (`setBackgroundColor`), as well as macOS `underPageBackgroundColor`.
+- New `WebviewSettings.coverUntilFirstPaint` (true by default): a Flutter curtain of the `initialBackgroundColor` color covers the native view until the first render, then fades out in 150 ms.
 
-# macOS
-- Nouveau `WebviewSettings.disableRightClickSelection` : le clic droit (et Ctrl+clic) ne sélectionne plus le mot sous le curseur.
+macOS
+- New `WebviewSettings.disableRightClickSelection`: right click (and Ctrl+click) no longer selects the word under the cursor.
 
-# Démarrage Android
-- Les événements natifs sont mis en file d'attente jusqu'à ce que Dart soit prêt (`ready`, envoyé après `onWebViewCreated`) : plus de `onLoadStart`/`onDOMContentLoaded` perdus ni d'appel `callHandler` avant `addJavaScriptHandler`.
-- Le pont `window.webview_plus` est injecté au démarrage du document (`addDocumentStartJavaScript`) au lieu d'un `evaluateJavascript` tardif.
-- `WebviewPlusPreloader.preloadDocument` : charge la page à l'avance dans une Webview détachée, adoptée instantanément par un `WebviewWidget` de mêmes paramètres (événements rejoués), rechargée automatiquement ensuite.
-- Les Webviews du pool utilisent un `MutableContextWrapper` rebranché sur l'Activité (thème de sélection, dialogues, IME).
+Android startup
+- Native events are queued until Dart is ready (`ready`, sent after `onWebViewCreated`): no more lost `onLoadStart`/`onDOMContentLoaded` and no `callHandler` call before `addJavaScriptHandler`.
+- The `window.webview_plus` bridge is injected at document start (`addDocumentStartJavaScript`) instead of a late `evaluateJavascript`.
+- `WebviewPlusPreloader.preloadDocument`: loads the page in advance in a detached Webview, instantly adopted by a `WebviewWidget` with the same parameters (events replayed), then reloaded automatically.
+- Pool Webviews use a `MutableContextWrapper` re-attached to the Activity (selection theme, dialogs, IME).
 
-# Correctif important
-- `WebviewBaseController` utilisait un champ `static` partagé : avec plusieurs Webviews vivantes, les callbacks d'une ancienne vue recevaient le contrôleur de la DERNIÈRE vue créée. Un contrôleur par vue désormais.
+Important fix
+- `WebviewBaseController` used a shared `static` field: with several live Webviews, the callbacks of an old view received the controller of the LAST created view. There is now one controller per view.
 
 ## 0.8.8
 
-- Linux : correction d'un use-after-free du buffer de pixels (thread raster Flutter vs redimensionnement) pouvant faire planter l'app au lancement d'une page WebView.
-- Linux : les erreurs X11 pendant la capture (BadMatch/BadWindow) sont piégées au lieu de tuer le processus.
-- Linux : plus de pointeurs pendants après `dispose` (callbacks `callHandler`, signaux WebKit, handler de canal).
-- Linux : capture à la demande (signal `draw`) au lieu de 60 fps permanents -> CPU ~0 à l'arrêt, rendu plus fluide.
-- Linux : prise en charge de `allowFileAccessFromFileURLs`, `allowUniversalAccessFromFileURLs`, `mediaPlaybackRequiresUserGesture`, `domStorageEnabled`, `initialBackgroundColor`; logs console en stdout si `isInspectable`.
-- Linux : `WEBKIT_DISABLE_DMABUF_RENDERER=1` et `WEBKIT_DISABLE_COMPOSITING_MODE=1` par défaut (sans écraser l'environnement existant).
-- Linux : fuite d'un `FlMethodResponse` par appel corrigée ; CMake crée `PkgConfig::GTK` si absent.
-- Dart : si le widget est démonté pendant `create`, la vue native est maintenant détruite.
-- Web : réécriture de l'implémentation iframe. `initialFile`, `initialCss`, `initialSettings` (user scripts, couleurs de sélection, menu contextuel, fond), `onLoadStart`, `onLoadStop`, `onDOMContentLoaded` et `onFontsIsLoaded` sont désormais pris en charge.
-- Web : le pont `window.webview_plus.callHandler` / `WebviewPlusChannel` est injecté au DÉMARRAGE du document (pages same-origin), plus seulement au `load`.
-- Web : les URLs d'assets Flutter sont résolues via `ui_web.assetManager` (l'ancienne résolution donnait un 404 pour `assets/xxx`, servi en réalité sous `assets/assets/xxx`).
-- Web : les messages sont filtrés par iframe (plusieurs Webviews ne se reçoivent plus mutuellement), l'écouteur `message` est libéré au dispose, `onWebViewCreated` est appelé avant le premier chargement.
+- Linux: fixed a use-after-free of the pixel buffer (Flutter raster thread vs resize) that could crash the app when launching a WebView page.
+- Linux: X11 errors during capture (BadMatch/BadWindow) are now trapped instead of killing the process.
+- Linux: no more dangling pointers after `dispose` (`callHandler` callbacks, WebKit signals, channel handler).
+- Linux: on-demand capture (`draw` signal) instead of a permanent 60 fps -> CPU ~0 when idle, smoother rendering.
+- Linux: support for `allowFileAccessFromFileURLs`, `allowUniversalAccessFromFileURLs`, `mediaPlaybackRequiresUserGesture`, `domStorageEnabled`, `initialBackgroundColor`; console logs on stdout if `isInspectable`.
+- Linux: `WEBKIT_DISABLE_DMABUF_RENDERER=1` and `WEBKIT_DISABLE_COMPOSITING_MODE=1` by default (without overwriting the existing environment).
+- Linux: fixed a leaked `FlMethodResponse` per call; CMake creates `PkgConfig::GTK` if missing.
+- Dart: if the widget is unmounted during `create`, the native view is now destroyed.
+- Web: rewrite of the iframe implementation. `initialFile`, `initialCss`, `initialSettings` (user scripts, selection colors, context menu, background), `onLoadStart`, `onLoadStop`, `onDOMContentLoaded` and `onFontsIsLoaded` are now supported.
+- Web: the `window.webview_plus.callHandler` / `WebviewPlusChannel` bridge is injected at document START (same-origin pages), not only on `load`.
+- Web: Flutter asset URLs are resolved through `ui_web.assetManager` (the old resolution gave a 404 for `assets/xxx`, which is actually served under `assets/assets/xxx`).
+- Web: messages are filtered per iframe (several Webviews no longer receive each other's messages), the `message` listener is released on dispose, `onWebViewCreated` is called before the first load.
 
 ## 0.8.7
 
@@ -91,12 +98,12 @@
 * **Custom URL Scheme (`app-assets://`)**: Introduced a custom URL scheme handler (`WKURLSchemeHandler`) to safely intercept local asset requests without conflicting with WebKit's security policies.
 * **MIME Type Resolver**: Added a helper function (`getMimeType`) in the Swift handler to map file extensions (such as `.jpg`, `.png`, `.css`, `.js`) to their respective MIME types, ensuring the WebView correctly renders the intercepted resources.
 
-## [Changed]
+[Changed]
 * **Native URL Scheme Registration**: Replaced the private, non-functional `_setURLSchemeHandler:forURLScheme:` method (which attempted to override `http`/`https`) with the official `setURLSchemeHandler(_:forURLScheme:)` method targeting the new `app-assets` scheme.
 * **Dart HTML Resource Paths**: Updated the local image path conversion in the Flutter layer to replace the restricted `file://` protocol with the new custom `app-assets://` prefix.
 * **Resource Loading Logic**: Rewrote the Swift resource handler to capture `app-assets://` URIs, dynamically convert them back to local file system paths (`file://`), read the data securely from the disk, and stream it back to the `WKWebView`.
 
-## [Fixed]
+[Fixed]
 * **`onLoadResource` Silent Failures**: Fixed a limitation where `WKWebView` silently ignored or blocked custom scheme handlers bound to standard web protocols (`http`, `https`, `file`), preventing resource interception events from triggering.
 
 ## 0.8.3
@@ -105,16 +112,16 @@
 
 ## 0.8.2
 
-### Fixed
+Fixed
 * **Linux: fixed a critical bug where opening a `WebviewWidget` could corrupt the Flutter engine's OpenGL rendering context**, breaking rendering across the *entire* app — not just the webview. Depending on timing, this ranged from a black band covering all Flutter widgets to a complete engine failure (`FlutterEngineRunTask` repeatedly returning `kInvalidArguments`, nothing rendering at all). Root cause: the plugin reparented the Flutter `FlView` into a new `GtkOverlay` *after* the engine had already bound its GL resource context to the view's original `GdkWindow`; tearing that window down and rebuilding it mid-session invalidated the context.
 
-### Changed — action required on Linux
+Changed — action required on Linux
 * **The `GtkOverlay` used to host native Webviews must now be created up front in `linux/my_application.cc`, before the engine starts rendering**, instead of being assembled at runtime by the plugin. This is what actually fixes the bug above. See the new **[Setup on Linux](README.md#setup-on-linux)** section for the exact snippet to add.
 * The plugin's previous runtime fallback (reparenting the `FlView` on first Webview creation) is kept only as a safety net for projects that haven't applied this change yet, and is no longer the recommended path — it remains susceptible to the rendering bug described above.
 
 ## 0.8.1
 
-### Fixed
+Fixed
 * **Android: fixed a major scroll/rendering performance regression** introduced by the transparent-background fix in a previous release. When `transparentBackground: true` was set, the WebView could get stuck permanently in `LAYER_TYPE_SOFTWARE` (CPU rendering) instead of switching back to `LAYER_TYPE_HARDWARE` after the page finished loading, causing persistent jank during scrolling and animations. The hardware layer switch is now only delayed by a couple of frames after `onPageFinished` (enough to avoid the black-flash artifact on the first transparent composite), then restored as before.
 * **Android: initial layer type is no longer forced to `LAYER_TYPE_SOFTWARE` at WebView creation** for opaque backgrounds, avoiding an unnecessary software-rendered frame before the first hardware composite.
 * **Android: fixed unnecessary `WindowInsets` rebuild/redispatch on every touch interaction** when `disableKeyboardResize: true` is set. The listener now only rebuilds and redispatches insets when the IME inset is actually non-zero, instead of doing so unconditionally — this was causing the engine to resend viewport metrics on every tap, adding visible input latency between touch and render.

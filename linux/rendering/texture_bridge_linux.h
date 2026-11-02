@@ -59,6 +59,12 @@ void linux_texture_bridge_set_rect(LinuxTextureBridge *bridge, int x, int y,
 // l'affichage, remontée AU-DESSUS des autres Webviews (mais sous la FlView).
 void linux_texture_bridge_set_visible(LinuxTextureBridge *bridge,
                                       gboolean visible);
+// Saisie de texte : quand un champ éditable de la page prend le focus, la
+// Webview reçoit le VRAI focus clavier GTK (IME, touches mortes, AltGr...) ;
+// quand il le perd, le focus retourne à la FlView (clavier Flutter).
+void linux_texture_bridge_set_text_focus(LinuxTextureBridge *bridge,
+                                         gboolean on);
+gboolean linux_texture_bridge_has_text_focus(LinuxTextureBridge *bridge);
 // À appeler quand WebKit affiche son menu contextuel natif : le relâchement
 // (synthétique) du clic droit qui suit est alors absorbé, pour ne pas
 // activer un élément du menu par erreur.

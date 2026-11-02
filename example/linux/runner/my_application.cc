@@ -7,21 +7,35 @@
 
 #include "flutter/generated_plugin_registrant.h"
 
+// Le runner repose sur FlApplication (Flutter >= 3.38 / stable récent) : le
+// moteur demande la fenêtre de CHAQUE vue (principale ET secondaires créées
+// par l'API multi-fenêtres) via `create_window`, avant tout rendu.
 struct _MyApplication {
-  GtkApplication parent_instance;
-  char** dart_entrypoint_arguments;
+  FlApplication parent_instance;
 };
 
-G_DEFINE_TYPE(MyApplication, my_application, GTK_TYPE_APPLICATION)
+G_DEFINE_TYPE(MyApplication, my_application, fl_application_get_type())
 
-// Called when first Flutter frame received.
-static void first_frame_cb(MyApplication* self, FlView* view) {
-  gtk_widget_show(gtk_widget_get_toplevel(GTK_WIDGET(view)));
-}
-
-// Implements GApplication::activate.
-static void my_application_activate(GApplication* application) {
-  MyApplication* self = MY_APPLICATION(application);
+// Implements FlApplication::create_window.
+//
+// webview_plus (mode intégré) : les Webviews sont de vrais widgets GTK
+// ajoutés PAR LE PLUGIN comme enfants overlay SOUS la vue Flutter. La vue
+// Flutter est dessinée par dessus avec un fond TRANSPARENT ; le widget Webview
+// de Dart perce un trou à son emplacement. WebKit se dessine donc nativement
+// (fluide) et les widgets Flutter (dialogs, barres, spinners) restent
+// au-dessus. Fonctionne aussi sous Wayland.
+//
+// Cette structure doit être créée ICI, avant que la FlView soit réalisée :
+// la réorganiser après coup corrompt le contexte OpenGL du moteur. C'est
+// pourquoi les fenêtres secondaires doivent passer par ce même code.
+//
+// Contraintes :
+//  - la FlView doit être un enfant OVERLAY (pas l'enfant principal) ;
+//  - l'enfant principal (`backdrop`) peut être n'importe quel widget vide,
+//    sans taille minimale (sinon la fenêtre ne pourrait plus rétrécir).
+// Sans cette structure, le plugin retombe sur le mode texture (instable).
+static GtkWindow* my_application_create_window(FlApplication* application,
+                                               FlView* view) {
   GtkWindow* window =
       GTK_WINDOW(gtk_application_window_new(GTK_APPLICATION(application)));
 
@@ -43,113 +57,55 @@ static void my_application_activate(GApplication* application) {
   }
 #endif
   if (use_header_bar) {
+    // Pas de titre explicite sur la header bar : elle affiche le titre de la
+    // fenêtre, que Dart peut changer (fenêtres secondaires).
     GtkHeaderBar* header_bar = GTK_HEADER_BAR(gtk_header_bar_new());
     gtk_widget_show(GTK_WIDGET(header_bar));
-    gtk_header_bar_set_title(header_bar, "webview_plus_example");
     gtk_header_bar_set_show_close_button(header_bar, TRUE);
     gtk_window_set_titlebar(window, GTK_WIDGET(header_bar));
-  } else {
-    gtk_window_set_title(window, "webview_plus_example");
   }
-
+  gtk_window_set_title(window, "JW Life");
   gtk_window_set_default_size(window, 1280, 720);
 
-  g_autoptr(FlDartProject) project = fl_dart_project_new();
-  fl_dart_project_set_dart_entrypoint_arguments(
-      project, self->dart_entrypoint_arguments);
-
-  FlView* view = fl_view_new(project);
-  // Fond TRANSPARENT : en mode intégré, webview_plus place le WebKitWebView
-  // SOUS la FlView et Flutter « perce » un trou à son emplacement.
-  GdkRGBA background_color;
-  gdk_rgba_parse(&background_color, "#00000000");
-  fl_view_set_background_color(view, &background_color);
-  gtk_widget_show(GTK_WIDGET(view));
-
-  // GtkOverlay : enfant principal = widget de fond (vide), FlView = overlay.
-  // Les Webviews sont ajoutées par le plugin comme overlays SOUS la FlView.
-  // (Ne pas mettre la FlView comme enfant principal.)
   GtkWidget* overlay = gtk_overlay_new();
   GtkWidget* backdrop = gtk_fixed_new();
-  gtk_container_add(GTK_CONTAINER(overlay), backdrop);
-  gtk_overlay_add_overlay(GTK_OVERLAY(overlay), GTK_WIDGET(view));
+  gtk_container_add(GTK_CONTAINER(overlay), backdrop);  // tout en dessous
   gtk_widget_show(backdrop);
+
+  GdkRGBA background_color = {0.0, 0.0, 0.0, 0.0};  // transparent
+  fl_view_set_background_color(view, &background_color);
+  gtk_overlay_add_overlay(GTK_OVERLAY(overlay), GTK_WIDGET(view));  // dessus
   gtk_widget_show(overlay);
   gtk_container_add(GTK_CONTAINER(window), overlay);
 
-  // Noir derrière la vue (ce que voyait l'ancien fond de la FlView).
-  GtkCssProvider* css = gtk_css_provider_new();
-  gtk_css_provider_load_from_data(css, "window { background-color: #000000; }",
-                                  -1, nullptr);
-  gtk_style_context_add_provider_for_screen(
-      gdk_screen_get_default(), GTK_STYLE_PROVIDER(css),
-      GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
-  g_object_unref(css);
-
-  // Show the window when Flutter renders.
-  // Requires the view to be realized so we can start rendering.
-  g_signal_connect_swapped(view, "first-frame", G_CALLBACK(first_frame_cb),
-                           self);
-  gtk_widget_realize(GTK_WIDGET(view));
-
-  fl_register_plugins(FL_PLUGIN_REGISTRY(view));
-
-  gtk_widget_grab_focus(GTK_WIDGET(view));
-}
-
-// Implements GApplication::local_command_line.
-static gboolean my_application_local_command_line(GApplication* application,
-                                                  gchar*** arguments,
-                                                  int* exit_status) {
-  MyApplication* self = MY_APPLICATION(application);
-  // Strip out the first argument as it is the binary name.
-  self->dart_entrypoint_arguments = g_strdupv(*arguments + 1);
-
-  g_autoptr(GError) error = nullptr;
-  if (!g_application_register(application, nullptr, &error)) {
-    g_warning("Failed to register: %s", error->message);
-    *exit_status = 1;
-    return TRUE;
+  // Fond noir derrière la vue : c'est ce qu'on voit dans le « trou » d'une
+  // Webview masquée brièvement (maximisation / plein écran), au lieu de la
+  // couleur du thème GTK (blanc/gris = flash). Installé une seule fois.
+  static gboolean css_installed = FALSE;
+  if (!css_installed) {
+    css_installed = TRUE;
+    GtkCssProvider* css = gtk_css_provider_new();
+    gtk_css_provider_load_from_data(
+        css, "window { background-color: #000000; }", -1, nullptr);
+    gtk_style_context_add_provider_for_screen(
+        gdk_screen_get_default(), GTK_STYLE_PROVIDER(css),
+        GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+    g_object_unref(css);
   }
 
-  g_application_activate(application);
-  *exit_status = 0;
-
-  return TRUE;
+  return window;
 }
 
-// Implements GApplication::startup.
-static void my_application_startup(GApplication* application) {
-  // MyApplication* self = MY_APPLICATION(object);
-
-  // Perform any actions required at application startup.
-
-  G_APPLICATION_CLASS(my_application_parent_class)->startup(application);
-}
-
-// Implements GApplication::shutdown.
-static void my_application_shutdown(GApplication* application) {
-  // MyApplication* self = MY_APPLICATION(object);
-
-  // Perform any actions required at application shutdown.
-
-  G_APPLICATION_CLASS(my_application_parent_class)->shutdown(application);
-}
-
-// Implements GObject::dispose.
-static void my_application_dispose(GObject* object) {
-  MyApplication* self = MY_APPLICATION(object);
-  g_clear_pointer(&self->dart_entrypoint_arguments, g_strfreev);
-  G_OBJECT_CLASS(my_application_parent_class)->dispose(object);
+// Implements FlApplication::register_plugins.
+static void my_application_register_plugins(FlApplication* application,
+                                            FlPluginRegistry* registry) {
+  fl_register_plugins(registry);
 }
 
 static void my_application_class_init(MyApplicationClass* klass) {
-  G_APPLICATION_CLASS(klass)->activate = my_application_activate;
-  G_APPLICATION_CLASS(klass)->local_command_line =
-      my_application_local_command_line;
-  G_APPLICATION_CLASS(klass)->startup = my_application_startup;
-  G_APPLICATION_CLASS(klass)->shutdown = my_application_shutdown;
-  G_OBJECT_CLASS(klass)->dispose = my_application_dispose;
+  FL_APPLICATION_CLASS(klass)->create_window = my_application_create_window;
+  FL_APPLICATION_CLASS(klass)->register_plugins =
+      my_application_register_plugins;
 }
 
 static void my_application_init(MyApplication* self) {}

@@ -109,6 +109,9 @@ struct _LinuxTextureBridge {
   // synthétique qui suit doit être absorbé.
   gboolean swallow_secondary_release;
 
+  // La Webview détient le vrai focus clavier GTK (champ éditable actif).
+  gboolean text_focus;
+
   // Anti-scintillement pendant maximisation / plein écran.
   gboolean suspended;
   gint64 suspend_start_us;
@@ -412,6 +415,11 @@ void apply_visibility(LinuxTextureBridge *bridge) {
     gtk_widget_queue_resize(widget);
     if (bridge->overlay != nullptr) gtk_widget_queue_draw(bridge->overlay);
   } else {
+    // Page recouverte : le clavier retourne à Flutter. (Pas pour une simple
+    // transition de fenêtre : on garde le focus de saisie.)
+    if (bridge->text_focus && !bridge->dart_visible) {
+      linux_texture_bridge_set_text_focus(bridge, FALSE);
+    }
     gtk_widget_hide(widget);
   }
 }
@@ -569,6 +577,32 @@ void linux_texture_bridge_set_visible(LinuxTextureBridge *bridge,
   if (bridge == nullptr || !bridge->embedded || bridge->stopped) return;
   bridge->dart_visible = visible;
   apply_visibility(bridge);
+}
+
+void linux_texture_bridge_set_text_focus(LinuxTextureBridge *bridge,
+                                         gboolean on) {
+  if (bridge == nullptr || !bridge->embedded || bridge->stopped ||
+      bridge->web_view == nullptr) {
+    return;
+  }
+  GtkWidget *widget = GTK_WIDGET(bridge->web_view);
+  if (on) {
+    if (bridge->text_focus || !gtk_widget_get_visible(widget)) return;
+    bridge->text_focus = TRUE;
+    bridge->focus_sent = TRUE;  // le vrai focus GTK suffit à WebKit
+    gtk_widget_set_can_focus(widget, TRUE);
+    gtk_widget_grab_focus(widget);
+  } else {
+    if (!bridge->text_focus) return;
+    bridge->text_focus = FALSE;
+    if (bridge->flview != nullptr) gtk_widget_grab_focus(bridge->flview);
+    gtk_widget_set_can_focus(widget, FALSE);
+    bridge->focus_sent = FALSE;  // le focus synthétique sera ré-envoyé
+  }
+}
+
+gboolean linux_texture_bridge_has_text_focus(LinuxTextureBridge *bridge) {
+  return bridge != nullptr && bridge->text_focus;
 }
 
 void linux_texture_bridge_note_context_menu(LinuxTextureBridge *bridge) {
@@ -747,8 +781,8 @@ void linux_texture_bridge_dispatch_pointer(LinuxTextureBridge *bridge,
     // Filet de sécurité clavier : si WebKit a malgré tout pris le focus GTK,
     // on le rend à la FlView (sinon Flutter ne reçoit plus aucune touche),
     // puis on re-signale à WebKit qu'il est actif.
-    if (is_press && bridge->embedded && bridge->flview != nullptr &&
-        bridge->toplevel != nullptr && GTK_IS_WINDOW(bridge->toplevel)) {
+    if (is_press && bridge->embedded && !bridge->text_focus &&
+        bridge->flview != nullptr && bridge->toplevel != nullptr && GTK_IS_WINDOW(bridge->toplevel)) {
       GtkWidget *focused = gtk_window_get_focus(GTK_WINDOW(bridge->toplevel));
       if (focused != nullptr &&
           (focused == GTK_WIDGET(bridge->web_view) ||

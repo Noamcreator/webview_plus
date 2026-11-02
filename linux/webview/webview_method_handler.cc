@@ -42,6 +42,15 @@ void eval_finished_cb(GObject *object, GAsyncResult *result, gpointer user_data)
       WEBKIT_WEB_VIEW(object), result, &error);
 
   if (error != nullptr) {
+    // « Unsupported result type » : le script s'est bien exécuté mais sa valeur
+    // de retour (noeud DOM, Promise, fonction...) n'est pas sérialisable.
+    // Android/iOS renvoient alors simplement null : on fait pareil plutôt que
+    // de lever une exception côté Dart.
+    if ((error->message != nullptr && strstr(error->message, "Unsupported result type") != nullptr)) {
+      respond(method_call, success_response());
+      g_object_unref(method_call);
+      return;
+    }
     respond(method_call, error_response("javascript_error", error->message));
     g_object_unref(method_call);
     return;
